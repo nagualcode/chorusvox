@@ -1,0 +1,36 @@
+[package]
+name = "decabuddy"
+version = "0.1.0"
+edition = "2021"
+description = "ChorusVox / Akai DecaBuddy v1.02 & HV10 Harmony Generator em Rust"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "decabuddy"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bin]]
+name = "decabuddy_cli"
+path = "src/bin/decabuddy_cli.rs"
+
+[features]
+default = []
+truce-plugin = ["dep:truce", "dep:truce-gui", "dep:truce-gui-types"]
+clap = ["truce-plugin", "dep:truce-clap", "dep:clap-sys"]
+vst3 = ["truce-plugin", "dep:truce-vst3"]
+au = ["truce-plugin", "dep:truce-au"]
+
+[dependencies]
+truce = { version = "6.3", optional = true }
+truce-gui = { version = "6.3", optional = true }
+truce-gui-types = { version = "6.3", optional = true }
+truce-clap = { version = "6.3", optional = true }
+clap-sys = { version = "0.5", optional = true }
+truce-vst3 = { version = "6.3", optional = true }
+truce-au = { version = "6.3", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

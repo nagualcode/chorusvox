@@ -1,0 +1,14 @@
+[vendor]
+name = "Jardim Sonoro"
+id = "com.jardimsonoro"
+au_manufacturer = "JdSn"
+
+[[plugin]]
+name = "ChorusVox DecaBuddy"
+bundle_id = "chorusvox-decabuddy"
+crate = "decabuddy"
+category = "effect"
+vst3_subcategory = "Pitch Shift"
+fourcc = "DcBd"
+au_tag = "Music Effects"
+midi_input = true
