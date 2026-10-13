@@ -322,7 +322,6 @@ pub struct DecaBuddyProcessor {
     cached_formant_ratio: [f32; 4],
     cached_uni_ratio: f32,
 
-    // Variaveis de dimensionamento precomputadas por sample rate
     pub max_grain: usize,
     pub lookahead: usize,
     pub out_delay: usize,
@@ -912,9 +911,7 @@ impl DecaBuddyProcessor {
             let mut mix_l = dry_delayed * (self.dir_gain_smooth * self.dir_gl_smooth);
             let mut mix_r = dry_delayed * (self.dir_gain_smooth * self.dir_gr_smooth);
 
-            let uni_active = (target_uni_gain > 0.0 || self.uni_gain_smooth > 1e-4)
-                && self.params.unison.enabled
-                && !self.params.bypass;
+            let uni_active = target_uni_gain > 0.0 || self.uni_gain_smooth > 1e-4;
             if uni_active {
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample(
@@ -956,9 +953,7 @@ impl DecaBuddyProcessor {
                 s.gl_smooth = 0.995 * s.gl_smooth + 0.005 * pv.target_gl;
                 s.gr_smooth = 0.995 * s.gr_smooth + 0.005 * pv.target_gr;
 
-                let voice_active = (pv.target_gain > 0.0 || s.gain_smooth > 1e-4)
-                    && pv.enabled
-                    && !self.params.bypass;
+                let voice_active = target_voice_gain > 0.0 || s.gain_smooth > 1e-4;
                 if !voice_active {
                     if s.was_active {
                         self.harmony_dsp[v_idx].reset();
@@ -1459,10 +1454,15 @@ pub mod truce_integration {
                 state.out_l_scratch.resize(n, 0.0);
                 state.out_r_scratch.resize(n, 0.0);
             }
-
             let in_l = buffer.input(0);
-            state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
-
+            if buffer.num_input_channels() >= 2 {
+                let in_r = buffer.input(1);
+                for i in 0..n {
+                    state.mono_scratch[i] = 0.5 * (in_l[i] + in_r[i]);
+                }
+            } else {
+                state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
+            }
             state.core.process_block(
                 &state.mono_scratch[..n],
                 &mut state.out_l_scratch[..n],
@@ -1491,7 +1491,7 @@ pub mod truce_integration {
             ProcessStatus::Normal
         }
 
-        /// Interface vertical (1 voz por linha) com identificacao VOX 1..4 e titulo alinhado a esquerda.
+        /// Interface vertical (1 voz por linha) com identificacao VOX 1..4 e linha separadora horizontal.
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
                 section(
@@ -1522,7 +1522,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 1",
+                    "VOX 1 ____________________________________________________________________",
                     vec![
                         toggle(P::H1On, "On"),
                         toggle(P::H1Dual, "Dual"),
@@ -1535,7 +1535,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 2",
+                    "VOX 2 ____________________________________________________________________",
                     vec![
                         toggle(P::H2On, "On"),
                         toggle(P::H2Dual, "Dual"),
@@ -1548,7 +1548,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 3",
+                    "VOX 3 ____________________________________________________________________",
                     vec![
                         toggle(P::H3On, "On"),
                         toggle(P::H3Dual, "Dual"),
@@ -1561,7 +1561,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 4",
+                    "VOX 4 ____________________________________________________________________",
                     vec![
                         toggle(P::H4On, "On"),
                         toggle(P::H4Dual, "Dual"),
@@ -1574,7 +1574,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.1")
+            .with_title("CHORUSVOX DECABUDDY v0.2.3")
             .into_editor(&params)
         }
     }

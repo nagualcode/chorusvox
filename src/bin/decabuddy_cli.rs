@@ -1,4 +1,4 @@
-//! CLI de validacao e processamento WAV para o ChorusVox / DecaBuddy.
+//! CLI de validacao, processamento WAV e Benchmark para o ChorusVox / DecaBuddy.
 
 use decabuddy::dsp::FastRng;
 use decabuddy::scales::ScaleId;
@@ -7,6 +7,7 @@ use std::env;
 use std::f32::consts::PI;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::time::Instant;
 
 const SR: u32 = 44_100;
 
@@ -266,6 +267,7 @@ fn main() -> std::io::Result<()> {
     let mut out_l = vec![0.0_f32; input.len()];
     let mut out_r = vec![0.0_f32; input.len()];
 
+    let t0 = Instant::now();
     for ((in_blk, l_blk), r_blk) in input
         .chunks(128)
         .zip(out_l.chunks_mut(128))
@@ -273,10 +275,20 @@ fn main() -> std::io::Result<()> {
     {
         proc.process_block(in_blk, l_blk, r_blk);
     }
+    let el = t0.elapsed().as_secs_f32();
+    let dur = input.len() as f32 / sr as f32;
+
+    println!(
+        "Benchmark CPU: {:.1} ms para {:.2}s de audio = {:.0}x tempo real",
+        el * 1000.0,
+        dur,
+        dur / el.max(1e-6)
+    );
+
     write_wav_stereo_i16(out_path, &out_l, &out_r, sr)?;
     println!(
         "[Scale Mode] Concluido ({:.2}s, latencia = {} amostras) -> {}",
-        input.len() as f32 / sr as f32,
+        dur,
         proc.latency_samples(),
         out_path
     );
