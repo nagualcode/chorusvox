@@ -3,3 +3,6 @@
 do.py
 do2.py
 target/
+
+/target
+*.wav

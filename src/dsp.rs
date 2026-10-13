@@ -1,8 +1,8 @@
 //! Motor DSP de alta performance do ChorusVox / DecaBuddy.
-//! - Normalizacao NOLA por raw_w.max(0.08) eliminando o buzz na oitava abaixo.
-//! - Reducao SIMD desenrolada (sq_diff_simd) para analise YIN instantanea.
-//! - Mascara de delay em wrap circular antes da conversao para f32 (precisao perene).
-//! - Escalonamento total com sample_rate (suporte a 44.1k, 48k, 96k, 192k).
+//! - Normalizacao NOLA por raw_w.max(0.08).
+//! - Reducao SIMD desenrolada (sq_diff_simd) e filtro anti-aliasing FIR [0.25, 0.5, 0.25] na decimacao.
+//! - Wrap de mascara na delay line antes de converter para f32.
+//! - Escalonamento total por sample rate.
 
 use std::f32::consts::PI;
 
@@ -265,7 +265,11 @@ impl PitchTracker {
 
         let mut sum_sq = 0.0_f32;
         for i in 0..n_decim {
-            let s = ring[(start.wrapping_add(i * 2)) & RING_MASK];
+            let c = start.wrapping_add(i * 2);
+            let s_prev = ring[c.wrapping_sub(1) & RING_MASK];
+            let s_curr = ring[c & RING_MASK];
+            let s_next = ring[c.wrapping_add(1) & RING_MASK];
+            let s = 0.25 * s_prev + 0.5 * s_curr + 0.25 * s_next;
             self.decim_buf[i] = s;
             if i < w {
                 sum_sq += s * s;
@@ -417,6 +421,7 @@ impl PsolaSubVoice {
         extra_delay_ms: f32,
         unvoiced_gain: f32,
         sr: f32,
+        max_grain: usize,
     ) -> f32 {
         let n_pitch = self.rng_pitch.next_bipolar();
         let n_delay = self.rng_delay.next_bipolar();
@@ -431,8 +436,6 @@ impl PsolaSubVoice {
         let target_delay_samp =
             (target_delay_ms * 0.001 * sr).clamp(0.0, (DELAY_SIZE - 16) as f32);
         self.delay_mod_samples = 0.999 * self.delay_mod_samples + 0.001 * target_delay_samp;
-
-        let max_grain = max_grain_for_sr(sr);
 
         if voiced_mask > 0.01 && f0_hz > 50.0 {
             let cents_oct = (self.drift_cents + extra_cents) * (1.0 / 1200.0);
@@ -554,6 +557,7 @@ mod tests {
         let f0 = 220.0_f32;
         let period = (sr / f0) as usize;
         let mut latest_mark = write_pos - 512;
+        let max_grain = max_grain_for_sr(sr);
 
         let mut silence_rms_acc = 0.0_f32;
         let mut silence_count = 0usize;
@@ -590,6 +594,7 @@ mod tests {
                 0.0,
                 0.35,
                 sr,
+                max_grain,
             );
 
             if step > 7000 {
