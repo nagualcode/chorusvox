@@ -4,6 +4,9 @@ A real-time polyphonic vocal harmony generator written in **Rust**, faithful to 
 
 Built with the `truce` framework, delivering native **VST3**, **CLAP**, and **AUv2** (Audio Units) builds for macOS and Linux.
 
+
+![preview](preview.jpg)
+
 ---
 
 ## ⚡ How Does the DSP Engine Work?
