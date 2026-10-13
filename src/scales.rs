@@ -1,4 +1,4 @@
-//! Tabelas de escalas (HARMONYDATA.cpp) extraidas da DecaBuddy.dll (0x021100..0x0211A0).
+//! Tabelas de escalas (HARMONYDATA.cpp) extraidas da DecaBuddy.dll.
 
 pub const USER_NONE: i8 = i8::MIN;
 
@@ -93,19 +93,6 @@ impl ScaleId {
         AKAI_SCALE_NAMES[self as usize]
     }
 
-    pub fn display_name(self, voice_idx: usize) -> &'static str {
-        if self == ScaleId::User {
-            match voice_idx {
-                0 => "User 1",
-                1 => "User 2",
-                2 => "User 3",
-                _ => "User 4",
-            }
-        } else {
-            self.menu_name()
-        }
-    }
-
     pub fn root_pc(self) -> usize {
         use ScaleId::*;
         match self {
@@ -127,43 +114,13 @@ impl ScaleId {
 pub type ScaleTable = [Option<i8>; 12];
 
 pub const AKAI_SCALE_NAMES: [&str; 37] = [
-    "MIDI",
-    "User",
-    "Low Octave",
-    "Low 3rd|Modal 1",
-    "Low 3rd|Modal 2",
-    "Low 3rd|Modal 3",
-    "Low 3rd|Modal 4",
-    "Low 3rd|Modal 5",
-    "Low 3rd|Harmonic Minor",
-    "Low 3rd|Melodic Minor",
-    "Low 5th|Modal 1",
-    "Low 5th|Modal 2",
-    "Low 5th|Modal 3",
-    "Low 5th|Modal 4",
-    "Low 5th|Modal 5",
-    "Low 5th|Harmonic Minor",
-    "Low 5th|Melodic Minor",
-    "Low 7th|Major",
-    "Low 7th|Minor",
-    "Unison",
-    "High 3rd|Modal 1",
-    "High 3rd|Modal 2",
-    "High 3rd|Modal 3",
-    "High 3rd|Modal 4",
-    "High 3rd|Modal 5",
-    "High 3rd|Harmonic Minor",
-    "High 3rd|Melodic Minor",
-    "High 5th|Modal 1",
-    "High 5th|Modal 2",
-    "High 5th|Modal 3",
-    "High 5th|Modal 4",
-    "High 5th|Modal 5",
-    "High 5th|Harmonic Minor",
-    "High 5th|Melodic Minor",
-    "High 7th|Major",
-    "High 7th|Minor",
-    "High Octave",
+    "MIDI", "User", "Low Octave", "Low 3rd|Modal 1", "Low 3rd|Modal 2", "Low 3rd|Modal 3", "Low 3rd|Modal 4",
+    "Low 3rd|Modal 5", "Low 3rd|Harmonic Minor", "Low 3rd|Melodic Minor", "Low 5th|Modal 1", "Low 5th|Modal 2",
+    "Low 5th|Modal 3", "Low 5th|Modal 4", "Low 5th|Modal 5", "Low 5th|Harmonic Minor", "Low 5th|Melodic Minor",
+    "Low 7th|Major", "Low 7th|Minor", "Unison", "High 3rd|Modal 1", "High 3rd|Modal 2", "High 3rd|Modal 3",
+    "High 3rd|Modal 4", "High 3rd|Modal 5", "High 3rd|Harmonic Minor", "High 3rd|Melodic Minor", "High 5th|Modal 1",
+    "High 5th|Modal 2", "High 5th|Modal 3", "High 5th|Modal 4", "High 5th|Modal 5", "High 5th|Harmonic Minor",
+    "High 5th|Melodic Minor", "High 7th|Major", "High 7th|Minor", "High Octave",
 ];
 
 const N: Option<i8> = None;
@@ -227,6 +184,7 @@ impl Default for ScaleBank {
 }
 
 impl ScaleBank {
+    #[inline]
     pub fn get_table(&self, id: ScaleId, voice_idx: usize) -> &ScaleTable {
         match id {
             ScaleId::User => &self.user_tables[voice_idx.min(3)],
@@ -234,6 +192,7 @@ impl ScaleBank {
         }
     }
 
+    #[inline]
     pub fn lookup_offset(&self, id: ScaleId, voice_idx: usize, pitch_class: usize) -> Option<i8> {
         let table = self.get_table(id, voice_idx);
         let pc = pitch_class % 12;
@@ -268,19 +227,6 @@ impl ScaleBank {
             self.user_tables[user_idx][step].unwrap_or(USER_NONE)
         } else {
             USER_NONE
-        }
-    }
-
-    pub fn copy_scale(&mut self, src: ScaleId, src_voice: usize, dst_user_idx: Option<usize>) {
-        let copied = *self.get_table(src, src_voice);
-        match dst_user_idx {
-            Some(i) if i < 4 => self.user_tables[i] = copied,
-            None => {
-                for slot in &mut self.user_tables {
-                    *slot = copied;
-                }
-            }
-            _ => {}
         }
     }
 }

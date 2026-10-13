@@ -1,20 +1,33 @@
-//! Motor DSP em tempo real do ChorusVox / DecaBuddy.
+//! Motor DSP do ChorusVox / DecaBuddy.
+//! - Normalizacao NOLA por raw_w.max(0.08) evitando o buzz na oitava abaixo.
+//! - Lookahead seguro (LOOKAHEAD_SAMPLES) evitando colisao com o cabecote de gravacao.
+//! - Protecao anti-denormal nos filtros e delay lines.
+//! - Soft-clipper transparente com threshold assintotico em 0.75 (-2.5 dBFS).
 
 use std::f32::consts::PI;
 
 pub const RING_SIZE: usize = 16384;
 pub const RING_MASK: usize = RING_SIZE - 1;
 pub const MAX_GRAIN: usize = 2048;
+pub const HANN_LUT_SIZE: usize = 2048;
 
-pub const OUT_DELAY: usize = MAX_GRAIN / 2;
+// Lookahead suficiente para que mesmo na nota mais grave (f0=65Hz, T0=680, grao=1360)
+// o cabecote de leitura de graos nunca ultrapasse a posicao de gravacao atual.
+pub const LOOKAHEAD_SAMPLES: usize = 1536;
+pub const OUT_DELAY: usize = 512;
+pub const TOTAL_LATENCY: usize = LOOKAHEAD_SAMPLES + OUT_DELAY; // 2048 amostras (~46.4ms a 44.1k)
+
 pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 1.25;
+
+const OU_A: f32 = 0.99995;
+const OU_ONE_MINUS_A_TIMES_K: f32 = (1.0 - OU_A) * 346.40582;
 
 #[inline]
 pub fn yin_window_and_hop(sr: f32) -> (usize, usize) {
     let scale = (sr / 44_100.0).clamp(0.5, 4.0);
-    let win = ((2048.0 * scale).round() as usize)
+    let win = ((1024.0 * scale).round() as usize)
         .next_power_of_two()
-        .clamp(1024, 8192);
+        .clamp(512, 4096);
     let hop = ((256.0 * scale).round() as usize).clamp(128, 1024);
     (win, hop)
 }
@@ -22,6 +35,11 @@ pub fn yin_window_and_hop(sr: f32) -> (usize, usize) {
 #[inline]
 pub fn hz_to_midi(f_hz: f32, tune_hz: f32) -> f32 {
     69.0 + 12.0 * (f_hz.max(1e-3) / tune_hz.clamp(427.0, 453.0)).log2()
+}
+
+#[inline(always)]
+pub fn fast_exp2_small(x: f32) -> f32 {
+    1.0 + x * (0.6931472 + x * (0.2402265 + x * 0.0555041))
 }
 
 #[inline]
@@ -45,6 +63,29 @@ pub fn pan50_to_gains(pan_50: f32) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
+#[inline(always)]
+pub fn soft_saturate(x: f32) -> f32 {
+    const THRESHOLD: f32 = 0.75;
+    if x > THRESHOLD {
+        let over = x - THRESHOLD;
+        THRESHOLD + (1.0 - THRESHOLD) * (over / (1.0 + over))
+    } else if x < -THRESHOLD {
+        let under = -x - THRESHOLD;
+        -(THRESHOLD + (1.0 - THRESHOLD) * (under / (1.0 + under)))
+    } else {
+        x
+    }
+}
+
+pub fn build_hann_lut() -> Vec<f32> {
+    let mut lut = vec![0.0_f32; HANN_LUT_SIZE];
+    let inv = 1.0 / (HANN_LUT_SIZE as f32);
+    for (k, slot) in lut.iter_mut().enumerate() {
+        *slot = 0.5 * (1.0 - (2.0 * PI * (k as f32) * inv).cos());
+    }
+    lut
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FastRng {
     state: u32,
@@ -57,7 +98,7 @@ impl FastRng {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn next_u32(&mut self) -> u32 {
         let mut x = self.state;
         x ^= x << 13;
@@ -67,9 +108,9 @@ impl FastRng {
         x
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn next_bipolar(&mut self) -> f32 {
-        (self.next_u32() as f32 / (u32::MAX as f32)) * 2.0 - 1.0
+        (self.next_u32() as f32) * (2.0 / (u32::MAX as f32)) - 1.0
     }
 }
 
@@ -98,9 +139,11 @@ impl BiquadLowpass {
         self.a2 = (1.0 - alpha) / a0;
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn process(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.z1;
+        let mut y = self.b0 * x + self.z1;
+        y += 1e-15;
+        y -= 1e-15;
         self.z1 = self.b1 * x - self.a1 * y + self.z2;
         self.z2 = self.b2 * x - self.a2 * y;
         y
@@ -116,6 +159,8 @@ pub struct PitchTracker {
     pub yin_win: usize,
     pub yin_hop: usize,
     cmnd: Vec<f32>,
+    oct_bias_lut: Vec<f32>,
+    decim_buf: Vec<f32>,
     smooth_midi: f32,
     pub current_f0: f32,
     pub current_midi: f32,
@@ -133,20 +178,34 @@ impl Default for PitchTracker {
 impl PitchTracker {
     pub fn new(sr: f32) -> Self {
         let (yin_win, yin_hop) = yin_window_and_hop(sr);
-        Self {
-            fmin: 70.0,
+        let mut pt = Self {
+            fmin: 75.0,
             fmax: 900.0,
             threshold: 0.32,
             hysteresis_semi: 0.65,
             yin_win,
             yin_hop,
             cmnd: vec![1.0; yin_win / 2],
+            oct_bias_lut: vec![0.0; yin_win / 2],
+            decim_buf: vec![0.0; yin_win],
             smooth_midi: 60.0,
             current_f0: 0.0,
             current_midi: 60.0,
             current_note: -1,
             voiced: false,
             unvoiced_hold: 0,
+        };
+        pt.rebuild_luts(sr);
+        pt
+    }
+
+    fn rebuild_luts(&mut self, sr: f32) {
+        let sr_decim = sr * 0.5;
+        let tau_min = ((sr_decim / self.fmax) as usize).max(2);
+        let max_len = self.yin_win / 2;
+        self.oct_bias_lut.resize(max_len, 0.0);
+        for tau in tau_min..max_len {
+            self.oct_bias_lut[tau] = 0.02 * ((tau as f32) / (tau_min as f32)).log2();
         }
     }
 
@@ -155,6 +214,8 @@ impl PitchTracker {
         self.yin_win = yin_win;
         self.yin_hop = yin_hop;
         self.cmnd.resize(yin_win / 2, 1.0);
+        self.decim_buf.resize(yin_win, 0.0);
+        self.rebuild_luts(sr);
         self.reset();
     }
 
@@ -168,18 +229,22 @@ impl PitchTracker {
     }
 
     pub fn analyze_frame(&mut self, ring: &[f32], write_pos: usize, sr: f32, tune_hz: f32) {
-        let win = self.yin_win;
-        let tau_min = ((sr / self.fmax) as usize).max(2);
-        let tau_max = ((sr / self.fmin) as usize).min(win / 2 - 2);
-        let w = win - tau_max;
-        let start = write_pos.wrapping_sub(win);
+        let n_decim = self.yin_win;
+        let sr_decim = sr * 0.5;
+        let tau_min = ((sr_decim / self.fmax) as usize).max(2);
+        let tau_max = ((sr_decim / self.fmin) as usize).min(n_decim / 2 - 2);
+        let w = n_decim - tau_max;
+        let start = write_pos.wrapping_sub(n_decim * 2);
 
         let mut sum_sq = 0.0_f32;
-        for i in 0..w {
-            let s = ring[(start.wrapping_add(i)) & RING_MASK];
-            sum_sq += s * s;
+        for i in 0..n_decim {
+            let s = ring[(start.wrapping_add(i * 2)) & RING_MASK];
+            self.decim_buf[i] = s;
+            if i < w {
+                sum_sq += s * s;
+            }
         }
-        let rms = (sum_sq / w as f32).sqrt();
+        let rms = (sum_sq / (w as f32)).sqrt();
         if rms < 0.004 {
             self.mark_unvoiced();
             return;
@@ -187,11 +252,11 @@ impl PitchTracker {
 
         self.cmnd[0] = 1.0;
         let mut running_sum = 0.0_f32;
+        let base_slice = &self.decim_buf[0..w];
         for tau in 1..=tau_max {
+            let shifted_slice = &self.decim_buf[tau..tau + w];
             let mut diff = 0.0_f32;
-            for i in 0..w {
-                let a = ring[(start.wrapping_add(i)) & RING_MASK];
-                let b = ring[(start.wrapping_add(i + tau)) & RING_MASK];
+            for (&a, &b) in base_slice.iter().zip(shifted_slice.iter()) {
                 let d = a - b;
                 diff += d * d;
             }
@@ -205,13 +270,16 @@ impl PitchTracker {
 
         let mut best_tau = 0usize;
         let mut best_cost = 1e9_f32;
+        let prev_f0 = self.current_f0;
+        let was_voiced = self.voiced && prev_f0 > 0.0;
+
         for tau in tau_min..tau_max {
             let c = self.cmnd[tau];
             if c < self.threshold && c < self.cmnd[tau - 1] && c <= self.cmnd[tau + 1] {
-                let oct_bias = 0.02 * ((tau as f32) / (tau_min as f32)).log2();
-                let cand_f0 = sr / (tau as f32);
-                let jump_cost = if self.voiced && self.current_f0 > 0.0 {
-                    0.04 * (12.0 * (cand_f0 / self.current_f0).log2()).abs().min(12.0)
+                let oct_bias = self.oct_bias_lut[tau];
+                let jump_cost = if was_voiced {
+                    let cand_f0 = sr_decim / (tau as f32);
+                    0.04 * (12.0 * (cand_f0 / prev_f0).log2()).abs().min(12.0)
                 } else {
                     0.0
                 };
@@ -238,7 +306,7 @@ impl PitchTracker {
             0.0
         };
         let refined_tau = (best_tau as f32 + frac.clamp(-0.5, 0.5)).max(1.0);
-        let f0 = sr / refined_tau;
+        let f0 = sr_decim / refined_tau;
         let midi = hz_to_midi(f0, tune_hz);
 
         if !self.voiced {
@@ -311,9 +379,11 @@ impl PsolaSubVoice {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     pub fn step_sample(
         &mut self,
         dry_ring: &[f32],
+        hann_lut: &[f32],
         read_pos: usize,
         emit_pos: usize,
         latest_mark: usize,
@@ -328,13 +398,13 @@ impl PsolaSubVoice {
         unvoiced_gain: f32,
         sr: f32,
     ) -> f32 {
-        const A: f32 = 0.99995;
-        let k_norm = ((1.0 + A) / (1.0 - A)).sqrt() * 3.0_f32.sqrt();
         let n_pitch = self.rng_pitch.next_bipolar();
         let n_delay = self.rng_delay.next_bipolar();
 
-        self.drift_cents = A * self.drift_cents + (1.0 - A) * n_pitch * k_norm * (9.0 * random_norm);
-        self.delay_rand_norm = A * self.delay_rand_norm + (1.0 - A) * n_delay * k_norm;
+        self.drift_cents =
+            OU_A * self.drift_cents + OU_ONE_MINUS_A_TIMES_K * n_pitch * (9.0 * random_norm);
+        self.delay_rand_norm =
+            OU_A * self.delay_rand_norm + OU_ONE_MINUS_A_TIMES_K * n_delay;
 
         let jitter_ms = (self.delay_rand_norm * 0.5 + 0.5).clamp(0.0, 1.5) * (16.0 * random_norm);
         let target_delay_ms = jitter_ms + extra_delay_ms;
@@ -343,7 +413,8 @@ impl PsolaSubVoice {
         self.delay_mod_samples = 0.999 * self.delay_mod_samples + 0.001 * target_delay_samp;
 
         if voiced_mask > 0.01 && f0_hz > 50.0 {
-            let cents_factor = 2.0_f32.powf((self.drift_cents + extra_cents) / 1200.0);
+            let cents_oct = (self.drift_cents + extra_cents) * (1.0 / 1200.0);
+            let cents_factor = fast_exp2_small(cents_oct);
             let ratio = (pitch_ratio * cents_factor).clamp(0.25, 4.0);
             let ta = (sr / f0_hz).clamp(20.0, (MAX_GRAIN / 2 - 4) as f32);
             let ts = (ta / ratio).clamp(12.0, (MAX_GRAIN - 8) as f32);
@@ -353,7 +424,14 @@ impl PsolaSubVoice {
                 self.synth_phase += ts;
                 let grain_len = ((2.0 * ta).max(PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
                     .clamp(31, MAX_GRAIN - 1);
-                self.splat_grain(dry_ring, latest_mark, read_pos, grain_len, formant_ratio);
+                self.splat_grain(
+                    dry_ring,
+                    hann_lut,
+                    latest_mark,
+                    read_pos,
+                    grain_len,
+                    formant_ratio,
+                );
             }
         } else {
             self.synth_phase = 0.0;
@@ -365,11 +443,13 @@ impl PsolaSubVoice {
         self.out_ring[idx] = 0.0;
         self.w_ring[idx] = 0.0;
 
-        let wet = if raw_w > 0.05 { raw_out / raw_w } else { raw_out };
+        // Normalizacao NOLA por raw_w.max(0.08):
+        // Elimina o buzz de 46% de modulacao na oitava abaixo sem cortes quadrados!
+        let wet = raw_out / raw_w.max(0.08);
         let dry = dry_ring[idx];
         let combined = wet * emit_mask + dry * (1.0 - emit_mask) * unvoiced_gain;
 
-        self.delay_line[self.delay_write & DELAY_MASK] = combined;
+        self.delay_line[self.delay_write & DELAY_MASK] = combined + 1e-15 - 1e-15;
         let read_f = self.delay_write as f32 - self.delay_mod_samples;
         let r0 = (read_f.floor() as isize) & (DELAY_MASK as isize);
         let r1 = (r0 + 1) & (DELAY_MASK as isize);
@@ -380,9 +460,11 @@ impl PsolaSubVoice {
         delayed
     }
 
+    #[inline]
     fn splat_grain(
         &mut self,
         dry_ring: &[f32],
+        hann_lut: &[f32],
         mark_center: usize,
         out_center: usize,
         l_base: usize,
@@ -391,7 +473,8 @@ impl PsolaSubVoice {
         let fr = formant_ratio.clamp(0.5, 2.0);
         let l_out = (((l_base as f32) / fr).round() as usize | 1).clamp(17, MAX_GRAIN - 1);
         let half_out = (l_out / 2) as isize;
-        let inv_l = 1.0 / (l_out as f32);
+        let lut_step = ((HANN_LUT_SIZE << 16) / l_out).max(1);
+        let mut lut_phase = 0usize;
 
         for k in 0..l_out {
             let offset_out = k as isize - half_out;
@@ -401,9 +484,11 @@ impl PsolaSubVoice {
 
             let p0 = (mark_center as isize + src_i0) as usize & RING_MASK;
             let p1 = (p0 + 1) & RING_MASK;
-            let sample = dry_ring[p0] * (1.0 - frac) + dry_ring[p1] * frac;
+            let sample = dry_ring[p0] + frac * (dry_ring[p1] - dry_ring[p0]);
 
-            let w = 0.5 * (1.0 - (2.0 * PI * (k as f32) * inv_l).cos());
+            let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
+            lut_phase += lut_step;
+
             let dst = (out_center as isize + offset_out) as usize & RING_MASK;
             self.out_ring[dst] += sample * w;
             self.w_ring[dst] += w;
@@ -428,5 +513,77 @@ impl HarmonyChannelDsp {
     pub fn reset(&mut self) {
         self.main.reset();
         self.dual.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_psola_ring_no_ghost_echo() {
+        let sr = 44_100.0;
+        let hann_lut = build_hann_lut();
+        let mut voice = PsolaSubVoice::new(1);
+        let mut dry_ring = vec![0.0_f32; RING_SIZE];
+        let mut write_pos = 2048usize;
+        let f0 = 220.0_f32;
+        let period = (sr / f0) as usize;
+        let mut latest_mark = write_pos - 512;
+
+        let mut silence_rms_acc = 0.0_f32;
+        let mut silence_count = 0usize;
+
+        for step in 0..14_000 {
+            let x = if step < 4000 {
+                (2.0 * PI * f0 * (step as f32) / sr).sin() * 0.8
+            } else {
+                0.0
+            };
+            let voiced = if step < 4000 { 1.0 } else { 0.0 };
+            dry_ring[write_pos & RING_MASK] = x;
+
+            let read_pos = write_pos.wrapping_sub(512);
+            let emit_pos = read_pos.wrapping_sub(OUT_DELAY);
+            if step < 4000 && read_pos.wrapping_sub(latest_mark) >= period {
+                latest_mark = read_pos;
+            }
+            let emit_voiced = if step >= 512 + OUT_DELAY && step < 4000 + 512 + OUT_DELAY {
+                1.0
+            } else {
+                0.0
+            };
+
+            let y = voice.step_sample(
+                &dry_ring,
+                &hann_lut,
+                read_pos,
+                emit_pos,
+                latest_mark,
+                voiced,
+                emit_voiced,
+                f0,
+                1.25,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.35,
+                sr,
+            );
+
+            if step > 7000 {
+                silence_rms_acc += y * y;
+                silence_count += 1;
+            }
+            write_pos = write_pos.wrapping_add(1);
+        }
+
+        let ghost_rms = (silence_rms_acc / silence_count as f32).sqrt();
+        assert!(
+            ghost_rms < 1e-5,
+            "Eco fantasma detectado no anel PSOLA: RMS = {}",
+            ghost_rms
+        );
     }
 }

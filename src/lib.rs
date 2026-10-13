@@ -4,8 +4,9 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    gain_db_to_lin, pan50_to_gains, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp,
-    PitchTracker, PsolaSubVoice, OUT_DELAY, RING_MASK, RING_SIZE,
+    gain_db_to_lin, pan50_to_gains, soft_saturate, voice_db_to_lin, BiquadLowpass,
+    HarmonyChannelDsp, PitchTracker, PsolaSubVoice, LOOKAHEAD_SAMPLES, OUT_DELAY, RING_MASK,
+    RING_SIZE, TOTAL_LATENCY,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -121,6 +122,7 @@ pub const VST_PARAM_SPECS: [VstParamSpec; NUM_VST_PARAMS] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MidiHarmonyMode {
+    AutoChordOrMultiCh,
     MonoChannels,
     WaitAll,
     Priority,
@@ -219,7 +221,7 @@ impl Default for DecaBuddyParams {
             preset: -1,
             key: 0,
             midi_base_channel: 1,
-            midi_mode: MidiHarmonyMode::MonoChannels,
+            midi_mode: MidiHarmonyMode::AutoChordOrMultiCh,
             tune_hz: 440.0,
             input_gain_db: 0.0,
             preset_hotkey: 0,
@@ -279,6 +281,13 @@ pub struct InputMeterLeds {
     pub led_0_over: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+struct VoiceSlewState {
+    gain_smooth: f32,
+    gl_smooth: f32,
+    gr_smooth: f32,
+}
+
 pub struct DecaBuddyProcessor {
     pub sample_rate: f32,
     pub params: DecaBuddyParams,
@@ -286,6 +295,7 @@ pub struct DecaBuddyProcessor {
     pub scale_bank: ScaleBank,
     pub leds: InputMeterLeds,
 
+    hann_lut: Vec<f32>,
     dry_ring: Vec<f32>,
     lp_ring: Vec<f32>,
     mask_ring: Vec<f32>,
@@ -302,7 +312,19 @@ pub struct DecaBuddyProcessor {
     harmony_dsp: [HarmonyChannelDsp; 4],
 
     midi_target_note: [Option<u8>; 4],
-    chord_notes_fifo: Vec<u8>,
+    channel_note: [Option<u8>; 4],
+    chord_notes_fifo: [u8; 16],
+    chord_notes_len: usize,
+
+    // Suavizacao por amostra de ganho/pan (evita clicks e zipper noise)
+    harmony_slew: [VoiceSlewState; 4],
+    dir_gain_smooth: f32,
+    dir_gl_smooth: f32,
+    dir_gr_smooth: f32,
+    uni_gain_smooth: f32,
+    uni_gl_smooth: f32,
+    uni_gr_smooth: f32,
+    master_gain_smooth: f32,
 }
 
 impl DecaBuddyProcessor {
@@ -311,7 +333,7 @@ impl DecaBuddyProcessor {
         let mut lp = BiquadLowpass::default();
         lp.set_cutoff(400.0, sr);
         let pitch = PitchTracker::new(sr);
-        let init_write = pitch.yin_win + OUT_DELAY;
+        let init_write = LOOKAHEAD_SAMPLES * 2 + OUT_DELAY;
         let default_params = DecaBuddyParams::default();
 
         Self {
@@ -325,6 +347,7 @@ impl DecaBuddyProcessor {
             ],
             scale_bank: ScaleBank::default(),
             leds: InputMeterLeds::default(),
+            hann_lut: dsp::build_hann_lut(),
             dry_ring: vec![0.0; RING_SIZE],
             lp_ring: vec![0.0; RING_SIZE],
             mask_ring: vec![0.0; RING_SIZE],
@@ -332,7 +355,7 @@ impl DecaBuddyProcessor {
             hop_counter: 0,
             lp_filter: lp,
             pitch,
-            latest_mark: init_write.wrapping_sub(512),
+            latest_mark: init_write.wrapping_sub(LOOKAHEAD_SAMPLES),
             voiced_env: 0.0,
             unison_dsp: PsolaSubVoice::new(101),
             harmony_dsp: [
@@ -342,12 +365,22 @@ impl DecaBuddyProcessor {
                 HarmonyChannelDsp::new(501),
             ],
             midi_target_note: [None; 4],
-            chord_notes_fifo: Vec::with_capacity(16),
+            channel_note: [None; 4],
+            chord_notes_fifo: [0; 16],
+            chord_notes_len: 0,
+            harmony_slew: [VoiceSlewState::default(); 4],
+            dir_gain_smooth: 1.0,
+            dir_gl_smooth: 0.707,
+            dir_gr_smooth: 0.707,
+            uni_gain_smooth: 0.0,
+            uni_gl_smooth: 0.707,
+            uni_gr_smooth: 0.707,
+            master_gain_smooth: 1.0,
         }
     }
 
     pub fn latency_samples(&self) -> u32 {
-        (self.pitch.yin_win / 2 + OUT_DELAY) as u32
+        TOTAL_LATENCY as u32
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
@@ -362,8 +395,8 @@ impl DecaBuddyProcessor {
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
         self.pitch.reset();
-        self.write_pos = self.pitch.yin_win + OUT_DELAY;
-        self.latest_mark = self.write_pos.wrapping_sub(self.pitch.yin_win / 2);
+        self.write_pos = LOOKAHEAD_SAMPLES * 2 + OUT_DELAY;
+        self.latest_mark = self.write_pos.wrapping_sub(LOOKAHEAD_SAMPLES);
         self.hop_counter = 0;
         self.voiced_env = 0.0;
         self.unison_dsp.reset();
@@ -371,7 +404,18 @@ impl DecaBuddyProcessor {
             h.reset();
         }
         self.midi_target_note = [None; 4];
-        self.chord_notes_fifo.clear();
+        self.channel_note = [None; 4];
+        self.chord_notes_len = 0;
+        for s in &mut self.harmony_slew {
+            *s = VoiceSlewState::default();
+        }
+        self.dir_gain_smooth = 1.0;
+        self.dir_gl_smooth = 0.707;
+        self.dir_gr_smooth = 0.707;
+        self.uni_gain_smooth = 0.0;
+        self.uni_gl_smooth = 0.707;
+        self.uni_gr_smooth = 0.707;
+        self.master_gain_smooth = 1.0;
     }
 
     pub fn save_preset_slot(&mut self, slot: usize) {
@@ -517,28 +561,41 @@ impl DecaBuddyProcessor {
 
         match msg_type {
             0x90 if data2 > 0 => {
-                if self.params.midi_mode == MidiHarmonyMode::MonoChannels {
-                    if (offset_ch as usize) < 4 {
-                        self.midi_target_note[offset_ch as usize] = Some(data1);
-                    }
-                } else if ch == base_ch {
-                    if !self.chord_notes_fifo.contains(&data1) {
-                        self.chord_notes_fifo.push(data1);
-                    }
-                    self.assign_single_channel_chord_notes();
+                if (offset_ch as usize) < 4 {
+                    self.channel_note[offset_ch as usize] = Some(data1);
                 }
+                if ch == base_ch {
+                    let mut found = false;
+                    for i in 0..self.chord_notes_len {
+                        if self.chord_notes_fifo[i] == data1 {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found && self.chord_notes_len < 16 {
+                        self.chord_notes_fifo[self.chord_notes_len] = data1;
+                        self.chord_notes_len += 1;
+                    }
+                }
+                self.refresh_midi_targets();
             }
             0x80 | 0x90 => {
-                if self.params.midi_mode == MidiHarmonyMode::MonoChannels {
-                    if (offset_ch as usize) < 4
-                        && self.midi_target_note[offset_ch as usize] == Some(data1)
-                    {
-                        self.midi_target_note[offset_ch as usize] = None;
-                    }
-                } else if ch == base_ch {
-                    self.chord_notes_fifo.retain(|&n| n != data1);
-                    self.assign_single_channel_chord_notes();
+                if (offset_ch as usize) < 4
+                    && self.channel_note[offset_ch as usize] == Some(data1)
+                {
+                    self.channel_note[offset_ch as usize] = None;
                 }
+                if ch == base_ch {
+                    let mut new_len = 0;
+                    for i in 0..self.chord_notes_len {
+                        if self.chord_notes_fifo[i] != data1 {
+                            self.chord_notes_fifo[new_len] = self.chord_notes_fifo[i];
+                            new_len += 1;
+                        }
+                    }
+                    self.chord_notes_len = new_len;
+                }
+                self.refresh_midi_targets();
             }
             0xB0 => {
                 let norm = (data2 as f32) / 127.0;
@@ -559,6 +616,11 @@ impl DecaBuddyProcessor {
                             }
                         }
                     }
+                    120 | 123 => {
+                        self.channel_note = [None; 4];
+                        self.chord_notes_len = 0;
+                        self.midi_target_note = [None; 4];
+                    }
                     _ => {}
                 }
             }
@@ -566,21 +628,46 @@ impl DecaBuddyProcessor {
         }
     }
 
-    fn assign_single_channel_chord_notes(&mut self) {
-        let active_voices: Vec<usize> = (0..4)
-            .filter(|&i| {
-                self.params.harmonies[i].enabled && self.params.harmonies[i].scale == ScaleId::Midi
-            })
-            .collect();
+    fn refresh_midi_targets(&mut self) {
+        let mut active_voices = [0usize; 4];
+        let mut num_active = 0;
+        for i in 0..4 {
+            if self.params.harmonies[i].enabled && self.params.harmonies[i].scale == ScaleId::Midi {
+                active_voices[num_active] = i;
+                num_active += 1;
+            }
+        }
 
         match self.params.midi_mode {
-            MidiHarmonyMode::MonoChannels | MidiHarmonyMode::FlexiChord => {}
+            MidiHarmonyMode::MonoChannels => {
+                self.midi_target_note = self.channel_note;
+            }
+            MidiHarmonyMode::AutoChordOrMultiCh => {
+                let has_secondary_ch = self.channel_note[1..4].iter().any(|n| n.is_some());
+                if has_secondary_ch {
+                    self.midi_target_note = self.channel_note;
+                } else {
+                    self.midi_target_note = [None; 4];
+                    let mut sorted = [0u8; 16];
+                    let len = self.chord_notes_len.min(16);
+                    sorted[..len].copy_from_slice(&self.chord_notes_fifo[..len]);
+                    sorted[..len].sort_unstable();
+                    for k in 0..num_active {
+                        if k < len {
+                            self.midi_target_note[active_voices[k]] = Some(sorted[k]);
+                        }
+                    }
+                }
+            }
             MidiHarmonyMode::WaitAll => {
-                if self.chord_notes_fifo.len() >= active_voices.len() && !active_voices.is_empty() {
-                    let mut sorted = self.chord_notes_fifo.clone();
-                    sorted.sort_unstable();
-                    for (k, &v_idx) in active_voices.iter().enumerate() {
-                        self.midi_target_note[v_idx] = sorted.get(k).copied();
+                if self.chord_notes_len >= num_active && num_active > 0 {
+                    let mut sorted = [0u8; 16];
+                    let len = self.chord_notes_len.min(16);
+                    sorted[..len].copy_from_slice(&self.chord_notes_fifo[..len]);
+                    sorted[..len].sort_unstable();
+                    self.midi_target_note = [None; 4];
+                    for k in 0..num_active {
+                        self.midi_target_note[active_voices[k]] = Some(sorted[k]);
                     }
                 } else {
                     self.midi_target_note = [None; 4];
@@ -588,22 +675,120 @@ impl DecaBuddyProcessor {
             }
             MidiHarmonyMode::Priority => {
                 self.midi_target_note = [None; 4];
-                for (k, &v_idx) in active_voices.iter().enumerate() {
-                    self.midi_target_note[v_idx] = self.chord_notes_fifo.get(k).copied();
+                for k in 0..num_active {
+                    if k < self.chord_notes_len {
+                        self.midi_target_note[active_voices[k]] = Some(self.chord_notes_fifo[k]);
+                    }
                 }
             }
+            MidiHarmonyMode::FlexiChord => {}
         }
     }
 
     pub fn process_block(&mut self, input_mono: &[f32], out_l: &mut [f32], out_r: &mut [f32]) {
         let n = input_mono.len().min(out_l.len()).min(out_r.len());
+        if n == 0 {
+            return;
+        }
+        self.refresh_midi_targets();
+
         let in_gain = gain_db_to_lin(self.params.input_gain_db);
-        let master_gain = voice_db_to_lin(self.params.master_level_db);
+        let target_master_gain = if self.params.bypass { 1.0 } else { voice_db_to_lin(self.params.master_level_db) };
         let half_yin = self.pitch.yin_win / 2;
         let yin_hop = self.pitch.yin_hop;
 
+        let target_dir_gain = if !self.params.bypass && self.params.direct.enabled {
+            voice_db_to_lin(self.params.direct.level_db)
+        } else if self.params.bypass {
+            1.0
+        } else {
+            0.0
+        };
+        let (dir_target_gl, dir_target_gr) = pan50_to_gains(self.params.direct.pan);
+
+        let target_uni_gain = if !self.params.bypass && self.params.unison.enabled {
+            voice_db_to_lin(self.params.unison.level_db)
+        } else {
+            0.0
+        };
+        let (uni_target_gl, uni_target_gr) = pan50_to_gains(self.params.unison.pan);
+        let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
+        let uni_formant_ratio = 2.0_f32.powf((self.params.unison.formant * 0.09) / 12.0);
+        let uni_rand_norm = (self.params.unison.random * 0.01).clamp(0.0, 1.0);
+
+        #[derive(Clone, Copy)]
+        struct PreVoice {
+            enabled: bool,
+            dual: bool,
+            target_gain: f32,
+            target_gl: f32,
+            target_gr: f32,
+            d_gl: f32,
+            d_gr: f32,
+            formant_ratio: f32,
+            dual_formant_ratio: f32,
+            rand_norm: f32,
+            base_delay_ms: f32,
+        }
+
+        let mut pre_voices = [PreVoice {
+            enabled: false,
+            dual: false,
+            target_gain: 0.0,
+            target_gl: 0.0,
+            target_gr: 0.0,
+            d_gl: 0.0,
+            d_gr: 0.0,
+            formant_ratio: 1.0,
+            dual_formant_ratio: 1.0,
+            rand_norm: 0.0,
+            base_delay_ms: 0.0,
+        }; 4];
+
+        for v_idx in 0..4 {
+            let vp = if self.params.link && v_idx > 0 {
+                let mut linked = self.params.harmonies[v_idx];
+                linked.random = self.params.harmonies[0].random;
+                linked.formant = self.params.harmonies[0].formant;
+                linked.quantise = self.params.harmonies[0].quantise;
+                linked
+            } else {
+                self.params.harmonies[v_idx]
+            };
+
+            let raw_gain = if !self.params.bypass && vp.enabled {
+                voice_db_to_lin(vp.level_db)
+            } else {
+                0.0
+            };
+            let (gl, gr) = pan50_to_gains(vp.pan);
+            let (d_gl, d_gr) = pan50_to_gains(-vp.pan);
+            let formant_ratio = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
+            let dual_formant_ratio = 2.0_f32.powf(((vp.formant * 0.09) + 0.2) / 12.0);
+            let rand_norm = (vp.random * 0.01).clamp(0.0, 1.0);
+            let base_delay_ms = (v_idx as f32 + 1.0) * 4.5 * rand_norm;
+            let effective_gain = if vp.dual { raw_gain * 0.75 } else { raw_gain };
+
+            pre_voices[v_idx] = PreVoice {
+                enabled: vp.enabled,
+                dual: vp.dual,
+                target_gain: effective_gain,
+                target_gl: gl,
+                target_gr: gr,
+                d_gl,
+                d_gr,
+                formant_ratio,
+                dual_formant_ratio,
+                rand_norm,
+                base_delay_ms,
+            };
+        }
+
+        let mut peak = 0.0_f32;
+
         for i in 0..n {
             let x = input_mono[i] * in_gain;
+            peak = peak.max(x.abs());
 
             let w_idx = self.write_pos & RING_MASK;
             self.dry_ring[w_idx] = x;
@@ -613,6 +798,7 @@ impl DecaBuddyProcessor {
             self.hop_counter += 1;
             if self.hop_counter >= yin_hop {
                 self.hop_counter = 0;
+                let was_voiced = self.pitch.voiced;
                 self.pitch.analyze_frame(
                     &self.dry_ring,
                     self.write_pos,
@@ -622,13 +808,31 @@ impl DecaBuddyProcessor {
                 if self.pitch.voiced {
                     let cutoff = (self.pitch.current_f0 * 2.2).clamp(250.0, 1500.0);
                     self.lp_filter.set_cutoff(cutoff, self.sample_rate);
+
+                    // Sincroniza epoch mark com o pico inicial do onset
+                    if !was_voiced {
+                        let t0 = (self.sample_rate / self.pitch.current_f0).clamp(20.0, 600.0) as usize;
+                        let r = (t0 / 2).max(2);
+                        let center = self.write_pos.wrapping_sub(LOOKAHEAD_SAMPLES);
+                        let mut best_p = center;
+                        let mut best_v = -1e9_f32;
+                        for k in 0..(2 * r + 1) {
+                            let p = center.wrapping_sub(r).wrapping_add(k);
+                            let v = self.lp_ring[p & RING_MASK];
+                            if v > best_v {
+                                best_v = v;
+                                best_p = p;
+                            }
+                        }
+                        self.latest_mark = best_p;
+                    }
                 }
             }
 
             let target_mask = if self.pitch.voiced { 1.0 } else { 0.0 };
             self.voiced_env = 0.992 * self.voiced_env + 0.008 * target_mask;
 
-            let read_pos = self.write_pos.wrapping_sub(half_yin);
+            let read_pos = self.write_pos.wrapping_sub(LOOKAHEAD_SAMPLES);
             self.mask_ring[read_pos & RING_MASK] = self.voiced_env;
             let emit_pos = read_pos.wrapping_sub(OUT_DELAY);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
@@ -636,92 +840,78 @@ impl DecaBuddyProcessor {
 
             self.update_epoch_marks(read_pos);
 
-            if self.params.bypass {
-                out_l[i] = dry_delayed;
-                out_r[i] = dry_delayed;
-                self.write_pos = self.write_pos.wrapping_add(1);
-                continue;
-            }
+            // Suavizacao por amostra de parametros (elimina zipper noise e clicks de automacao)
+            self.dir_gain_smooth = 0.995 * self.dir_gain_smooth + 0.005 * target_dir_gain;
+            self.dir_gl_smooth = 0.995 * self.dir_gl_smooth + 0.005 * dir_target_gl;
+            self.dir_gr_smooth = 0.995 * self.dir_gr_smooth + 0.005 * dir_target_gr;
 
-            let mut mix_l = 0.0_f32;
-            let mut mix_r = 0.0_f32;
+            self.uni_gain_smooth = 0.995 * self.uni_gain_smooth + 0.005 * target_uni_gain;
+            self.uni_gl_smooth = 0.995 * self.uni_gl_smooth + 0.005 * uni_target_gl;
+            self.uni_gr_smooth = 0.995 * self.uni_gr_smooth + 0.005 * uni_target_gr;
 
-            if self.params.direct.enabled {
-                let g = voice_db_to_lin(self.params.direct.level_db);
-                if g > 0.0 {
-                    let (gl, gr) = pan50_to_gains(self.params.direct.pan);
-                    mix_l += dry_delayed * g * gl;
-                    mix_r += dry_delayed * g * gr;
-                }
-            }
+            self.master_gain_smooth = 0.995 * self.master_gain_smooth + 0.005 * target_master_gain;
 
-            if self.params.unison.enabled {
-                let u = &self.params.unison;
-                let g = voice_db_to_lin(u.level_db);
-                if g > 0.0 {
-                    let q_norm = (u.quantise * 0.01).clamp(0.0, 1.0);
-                    let dev_semi = if self.pitch.current_note >= 0 {
-                        self.pitch.current_midi - (self.pitch.current_note as f32)
-                    } else {
-                        0.0
-                    };
-                    let ratio = 2.0_f32.powf((-q_norm * dev_semi) / 12.0);
-                    let formant_ratio = 2.0_f32.powf((u.formant * 0.09) / 12.0);
-                    let rand_norm = (u.random * 0.01).clamp(0.0, 1.0);
+            let mut mix_l = dry_delayed * (self.dir_gain_smooth * self.dir_gl_smooth);
+            let mut mix_r = dry_delayed * (self.dir_gain_smooth * self.dir_gr_smooth);
 
-                    let y_u = self.unison_dsp.step_sample(
-                        &self.dry_ring,
-                        read_pos,
-                        emit_pos,
-                        self.latest_mark,
-                        self.voiced_env,
-                        emit_mask,
-                        self.pitch.current_f0,
-                        ratio,
-                        formant_ratio,
-                        rand_norm,
-                        0.0,
-                        11.0 * rand_norm,
-                        0.35,
-                        self.sample_rate,
-                    );
-                    let (gl, gr) = pan50_to_gains(u.pan);
-                    mix_l += y_u * g * gl;
-                    mix_r += y_u * g * gr;
-                }
-            }
+            // Unison
+            let uni_ratio = if self.pitch.current_note >= 0 {
+                let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
+                2.0_f32.powf((-uni_q_norm * dev) / 12.0)
+            } else {
+                1.0
+            };
 
+            let y_u = self.unison_dsp.step_sample(
+                &self.dry_ring,
+                &self.hann_lut,
+                read_pos,
+                emit_pos,
+                self.latest_mark,
+                self.voiced_env,
+                emit_mask,
+                self.pitch.current_f0,
+                uni_ratio,
+                uni_formant_ratio,
+                uni_rand_norm,
+                0.0,
+                11.0 * uni_rand_norm,
+                0.35,
+                self.sample_rate,
+            );
+            mix_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
+            mix_r += y_u * (self.uni_gain_smooth * self.uni_gr_smooth);
+
+            // 4 Harmonias (processamento continuo com drenagem de anel; razao de pitch por grao)
             for v_idx in 0..4 {
+                let pv = pre_voices[v_idx];
                 let vp = if self.params.link && v_idx > 0 {
-                    let mut linked = self.params.harmonies[v_idx];
-                    linked.random = self.params.harmonies[0].random;
-                    linked.formant = self.params.harmonies[0].formant;
-                    linked.quantise = self.params.harmonies[0].quantise;
-                    linked
+                    self.params.harmonies[0]
                 } else {
                     self.params.harmonies[v_idx]
                 };
 
-                if !vp.enabled {
-                    continue;
-                }
-                let gain = voice_db_to_lin(vp.level_db);
-                if gain <= 0.0 {
-                    continue;
-                }
-
-                let Some(shift_semi) = self.compute_voice_shift_semitones(v_idx, &vp) else {
-                    continue;
+                let pitch_ratio = if let Some(shift) = self.compute_voice_shift_semitones(v_idx, &vp) {
+                    2.0_f32.powf(shift / 12.0)
+                } else {
+                    1.0
                 };
 
-                let pitch_ratio = 2.0_f32.powf(shift_semi / 12.0);
-                let formant_semi = vp.formant * 0.09;
-                let formant_ratio = 2.0_f32.powf(formant_semi / 12.0);
-                let rand_norm = (vp.random * 0.01).clamp(0.0, 1.0);
-                let base_delay_ms = (v_idx as f32 + 1.0) * 4.5 * rand_norm;
+                let s = &mut self.harmony_slew[v_idx];
+                let target_voice_gain = if pv.enabled && self.pitch.voiced && self.pitch.current_note >= 0 {
+                    pv.target_gain
+                } else {
+                    0.0
+                };
 
+                s.gain_smooth = 0.995 * s.gain_smooth + 0.005 * target_voice_gain;
+                s.gl_smooth = 0.995 * s.gl_smooth + 0.005 * pv.target_gl;
+                s.gr_smooth = 0.995 * s.gr_smooth + 0.005 * pv.target_gr;
+
+                // unvoiced_gain = 0.0 nas harmonias para nao vazar consoantes secas fora do tom
                 let y_main = self.harmony_dsp[v_idx].main.step_sample(
                     &self.dry_ring,
+                    &self.hann_lut,
                     read_pos,
                     emit_pos,
                     self.latest_mark,
@@ -729,20 +919,18 @@ impl DecaBuddyProcessor {
                     emit_mask,
                     self.pitch.current_f0,
                     pitch_ratio,
-                    formant_ratio,
-                    rand_norm,
+                    pv.formant_ratio,
+                    pv.rand_norm,
                     0.0,
-                    base_delay_ms,
-                    0.35,
+                    pv.base_delay_ms,
+                    0.0,
                     self.sample_rate,
                 );
 
-                let (gl, gr) = pan50_to_gains(vp.pan);
-
-                if vp.dual {
-                    let dual_fr = 2.0_f32.powf((formant_semi + 0.2) / 12.0);
+                if pv.dual {
                     let y_dual = self.harmony_dsp[v_idx].dual.step_sample(
                         &self.dry_ring,
+                        &self.hann_lut,
                         read_pos,
                         emit_pos,
                         self.latest_mark,
@@ -750,35 +938,46 @@ impl DecaBuddyProcessor {
                         emit_mask,
                         self.pitch.current_f0,
                         pitch_ratio,
-                        dual_fr,
-                        rand_norm,
+                        pv.dual_formant_ratio,
+                        pv.rand_norm,
                         -9.0,
-                        base_delay_ms + 14.0,
-                        0.35,
+                        pv.base_delay_ms + 14.0,
+                        0.0,
                         self.sample_rate,
                     );
-                    let (d_gl, d_gr) = pan50_to_gains(-vp.pan);
-                    mix_l += (y_main * gl + y_dual * d_gl) * gain * 0.75;
-                    mix_r += (y_main * gr + y_dual * d_gr) * gain * 0.75;
+                    mix_l += (y_main * s.gl_smooth + y_dual * pv.d_gl) * s.gain_smooth;
+                    mix_r += (y_main * s.gr_smooth + y_dual * pv.d_gr) * s.gain_smooth;
                 } else {
-                    mix_l += y_main * gain * gl;
-                    mix_r += y_main * gain * gr;
+                    mix_l += y_main * (s.gain_smooth * s.gl_smooth);
+                    mix_r += y_main * (s.gain_smooth * s.gr_smooth);
+                }
+
+                // Drena buffer caso voz permaneca desligada
+                if !pv.enabled && s.gain_smooth < 1e-4 {
+                    self.harmony_dsp[v_idx].reset();
                 }
             }
 
-            out_l[i] = (mix_l * master_gain).clamp(-1.0, 1.0);
-            out_r[i] = (mix_r * master_gain).clamp(-1.0, 1.0);
+            // Saturacao suave (soft-clip transparente com threshold em -2.5 dBFS)
+            out_l[i] = soft_saturate(mix_l * self.master_gain_smooth);
+            out_r[i] = soft_saturate(mix_r * self.master_gain_smooth);
+
             self.write_pos = self.write_pos.wrapping_add(1);
         }
+
+        self.leds.led_neg12 = peak >= 0.251;
+        self.leds.led_neg6 = peak >= 0.501;
+        self.leds.led_0_over = peak >= 0.980;
     }
 
+    #[inline]
     fn update_epoch_marks(&mut self, read_pos: usize) {
         if !self.pitch.voiced || self.pitch.current_f0 <= 50.0 {
             self.latest_mark = read_pos;
             return;
         }
 
-        let t0 = (self.sample_rate / self.pitch.current_f0).clamp(20.0, 750.0) as usize;
+        let t0 = (self.sample_rate / self.pitch.current_f0).clamp(20.0, 600.0) as usize;
         let elapsed = read_pos.wrapping_sub(self.latest_mark);
         if elapsed > RING_SIZE / 2 {
             return;
@@ -830,23 +1029,23 @@ impl DecaBuddyProcessor {
     }
 
     fn flexichord_shift(&self, v_idx: usize, input_note: i32) -> Option<i32> {
-        if self.chord_notes_fifo.len() < 3 {
+        if self.chord_notes_len < 3 {
             return None;
         }
-        let mut pcs: Vec<i32> = self
-            .chord_notes_fifo
-            .iter()
-            .map(|&n| (n as i32).rem_euclid(12))
-            .collect();
-        pcs.sort_unstable();
-        pcs.dedup();
-
+        let mut pcs = [0i32; 16];
+        let len = self.chord_notes_len.min(16);
+        for i in 0..len {
+            pcs[i] = (self.chord_notes_fifo[i] as i32).rem_euclid(12);
+        }
+        pcs[..len].sort_unstable();
+        
         let in_pc = input_note.rem_euclid(12);
         match v_idx {
             0 => {
                 let mut found = 0;
                 for step in 1..=12 {
-                    if pcs.contains(&(in_pc - step).rem_euclid(12)) {
+                    let cpc = (in_pc - step).rem_euclid(12);
+                    if pcs[..len].contains(&cpc) {
                         found += 1;
                         if found == 2 {
                             return Some(-step);
@@ -855,14 +1054,29 @@ impl DecaBuddyProcessor {
                 }
                 None
             }
-            1 => (1..=12)
-                .find(|&step| pcs.contains(&(in_pc - step).rem_euclid(12)))
-                .map(|s| -s),
-            2 => (1..=12).find(|&step| pcs.contains(&(in_pc + step).rem_euclid(12))),
+            1 => {
+                for step in 1..=12 {
+                    let cpc = (in_pc - step).rem_euclid(12);
+                    if pcs[..len].contains(&cpc) {
+                        return Some(-step);
+                    }
+                }
+                None
+            }
+            2 => {
+                for step in 1..=12 {
+                    let cpc = (in_pc + step).rem_euclid(12);
+                    if pcs[..len].contains(&cpc) {
+                        return Some(step);
+                    }
+                }
+                None
+            }
             _ => {
                 let mut found = 0;
                 for step in 1..=12 {
-                    if pcs.contains(&(in_pc + step).rem_euclid(12)) {
+                    let cpc = (in_pc + step).rem_euclid(12);
+                    if pcs[..len].contains(&cpc) {
                         found += 1;
                         if found == 2 {
                             return Some(step);
@@ -885,205 +1099,162 @@ pub mod truce_integration {
 
     #[derive(ParamEnum, Debug)]
     pub enum KeyChoice {
-        #[name = "C"]
-        C,
-        #[name = "C#"]
-        Cs,
-        #[name = "D"]
-        D,
-        #[name = "D#"]
-        Ds,
-        #[name = "E"]
-        E,
-        #[name = "F"]
-        F,
-        #[name = "F#"]
-        Fs,
-        #[name = "G"]
-        G,
-        #[name = "G#"]
-        Gs,
-        #[name = "A"]
-        A,
-        #[name = "A#"]
-        As,
-        #[name = "B"]
-        B,
+        #[name = "C"] C, #[name = "C#"] Cs, #[name = "D"] D, #[name = "D#"] Ds,
+        #[name = "E"] E, #[name = "F"] F, #[name = "F#"] Fs, #[name = "G"] G,
+        #[name = "G#"] Gs, #[name = "A"] A, #[name = "A#"] As, #[name = "B"] B,
+    }
+
+    #[derive(ParamEnum, Debug)]
+    pub enum MidiModeChoice {
+        #[name = "Auto Ch"] AutoChordOrMultiCh,
+        #[name = "Mono (1-4)"] MonoChannels,
+        #[name = "Wait All"] WaitAll,
+        #[name = "Priority"] Priority,
+        #[name = "FlexiChd"] FlexiChord,
     }
 
     #[derive(ParamEnum, Debug)]
     pub enum ScaleChoice {
-        #[name = "MIDI"]
-        Midi,
-        #[name = "User"]
-        User,
-        #[name = "Low Octave"]
-        LowOctave,
-        #[name = "Low 3rd | Modal 1"]
-        Low3rdModal1,
-        #[name = "Low 3rd | Modal 2"]
-        Low3rdModal2,
-        #[name = "Low 3rd | Modal 3"]
-        Low3rdModal3,
-        #[name = "Low 3rd | Modal 4"]
-        Low3rdModal4,
-        #[name = "Low 3rd | Modal 5"]
-        Low3rdModal5,
-        #[name = "Low 3rd | Harmonic Minor"]
-        Low3rdHarmonicMinor,
-        #[name = "Low 3rd | Melodic Minor"]
-        Low3rdMelodicMinor,
-        #[name = "Low 5th | Modal 1"]
-        Low5thModal1,
-        #[name = "Low 5th | Modal 2"]
-        Low5thModal2,
-        #[name = "Low 5th | Modal 3"]
-        Low5thModal3,
-        #[name = "Low 5th | Modal 4"]
-        Low5thModal4,
-        #[name = "Low 5th | Modal 5"]
-        Low5thModal5,
-        #[name = "Low 5th | Harmonic Minor"]
-        Low5thHarmonicMinor,
-        #[name = "Low 5th | Melodic Minor"]
-        Low5thMelodicMinor,
-        #[name = "Low 7th | Major"]
-        Low7thMajor,
-        #[name = "Low 7th | Minor"]
-        Low7thMinor,
-        #[name = "Unison"]
-        Unison,
-        #[name = "High 3rd | Modal 1"]
-        High3rdModal1,
-        #[name = "High 3rd | Modal 2"]
-        High3rdModal2,
-        #[name = "High 3rd | Modal 3"]
-        High3rdModal3,
-        #[name = "High 3rd | Modal 4"]
-        High3rdModal4,
-        #[name = "High 3rd | Modal 5"]
-        High3rdModal5,
-        #[name = "High 3rd | Harmonic Minor"]
-        High3rdHarmonicMinor,
-        #[name = "High 3rd | Melodic Minor"]
-        High3rdMelodicMinor,
-        #[name = "High 5th | Modal 1"]
-        High5thModal1,
-        #[name = "High 5th | Modal 2"]
-        High5thModal2,
-        #[name = "High 5th | Modal 3"]
-        High5thModal3,
-        #[name = "High 5th | Modal 4"]
-        High5thModal4,
-        #[name = "High 5th | Modal 5"]
-        High5thModal5,
-        #[name = "High 5th | Harmonic Minor"]
-        High5thHarmonicMinor,
-        #[name = "High 5th | Melodic Minor"]
-        High5thMelodicMinor,
-        #[name = "High 7th | Major"]
-        High7thMajor,
-        #[name = "High 7th | Minor"]
-        High7thMinor,
-        #[name = "High Octave"]
-        HighOctave,
+        #[name = "MIDI"] Midi,
+        #[name = "User"] User,
+        #[name = "Low Octave"] LowOctave,
+        #[name = "Low 3rd | Mod 1"] Low3rdModal1,
+        #[name = "Low 3rd | Mod 2"] Low3rdModal2,
+        #[name = "Low 3rd | Mod 3"] Low3rdModal3,
+        #[name = "Low 3rd | Mod 4"] Low3rdModal4,
+        #[name = "Low 3rd | Mod 5"] Low3rdModal5,
+        #[name = "Low 3rd | Har Min"] Low3rdHarmonicMinor,
+        #[name = "Low 3rd | Mel Min"] Low3rdMelodicMinor,
+        #[name = "Low 5th | Mod 1"] Low5thModal1,
+        #[name = "Low 5th | Mod 2"] Low5thModal2,
+        #[name = "Low 5th | Mod 3"] Low5thModal3,
+        #[name = "Low 5th | Mod 4"] Low5thModal4,
+        #[name = "Low 5th | Mod 5"] Low5thModal5,
+        #[name = "Low 5th | Har Min"] Low5thHarmonicMinor,
+        #[name = "Low 5th | Mel Min"] Low5thMelodicMinor,
+        #[name = "Low 7th | Major"] Low7thMajor,
+        #[name = "Low 7th | Minor"] Low7thMinor,
+        #[name = "Unison"] Unison,
+        #[name = "High 3rd | Mod 1"] High3rdModal1,
+        #[name = "High 3rd | Mod 2"] High3rdModal2,
+        #[name = "High 3rd | Mod 3"] High3rdModal3,
+        #[name = "High 3rd | Mod 4"] High3rdModal4,
+        #[name = "High 3rd | Mod 5"] High3rdModal5,
+        #[name = "High 3rd | Har Min"] High3rdHarmonicMinor,
+        #[name = "High 3rd | Mel Min"] High3rdMelodicMinor,
+        #[name = "High 5th | Mod 1"] High5thModal1,
+        #[name = "High 5th | Mod 2"] High5thModal2,
+        #[name = "High 5th | Mod 3"] High5thModal3,
+        #[name = "High 5th | Mod 4"] High5thModal4,
+        #[name = "High 5th | Mod 5"] High5thModal5,
+        #[name = "High 5th | Har Min"] High5thHarmonicMinor,
+        #[name = "High 5th | Mel Min"] High5thMelodicMinor,
+        #[name = "High 7th | Major"] High7thMajor,
+        #[name = "High 7th | Minor"] High7thMinor,
+        #[name = "High Octave"] HighOctave,
     }
 
     #[derive(Params)]
     pub struct ChorusVoxParams {
         #[param(name = "Key", default = 0)]
         pub key: EnumParam<KeyChoice>,
+        #[param(name = "MIDI Mode", default = 0)]
+        pub midi_mode: EnumParam<MidiModeChoice>,
         #[param(name = "MIDI Ch", range = "linear(1, 16)", default = 1)]
         pub midi_ch: IntParam,
         #[param(name = "Tune", range = "linear(427, 453)", default = 440.0, unit = "Hz")]
         pub tune: FloatParam,
-        #[param(name = "Input Level", range = "linear(-15, 15)", default = 0.0, unit = "dB")]
+        #[param(name = "In Gain", range = "linear(-15, 15)", default = 0.0, unit = "dB")]
         pub input_gain: FloatParam,
         #[param(name = "Link", default = false)]
         pub link: BoolParam,
 
-        #[param(name = "Direct On", default = true)]
+        #[param(name = "Direct", default = true)]
         pub direct_on: BoolParam,
-        #[param(name = "Direct Level", range = "linear(-24, 0)", default = 0.0, unit = "dB")]
+        #[param(name = "Dir Lev", range = "linear(-24, 0)", default = 0.0, unit = "dB")]
         pub direct_level: FloatParam,
-        #[param(name = "Direct Pan", range = "linear(-50, 50)", default = 0.0)]
+        #[param(name = "Dir Pan", range = "linear(-50, 50)", default = 0.0)]
         pub direct_pan: FloatParam,
 
-        #[param(name = "Unison On", default = false)]
+        #[param(name = "Unison", default = false)]
         pub unison_on: BoolParam,
-        #[param(name = "Unison Random", range = "linear(0, 100)", default = 0.0)]
+        #[param(name = "U.Rand", range = "linear(0, 100)", default = 0.0)]
         pub unison_random: FloatParam,
-        #[param(name = "Unison Formant", range = "linear(-50, 50)", default = 0.0)]
+        #[param(name = "U.Form", range = "linear(-50, 50)", default = 0.0)]
         pub unison_formant: FloatParam,
-        #[param(name = "Unison Quantise", range = "linear(0, 100)", default = 0.0)]
+        #[param(name = "U.Quant", range = "linear(0, 100)", default = 0.0)]
         pub unison_quantise: FloatParam,
-        #[param(name = "Unison Level", range = "linear(-24, 0)", default = 0.0, unit = "dB")]
+        #[param(name = "U.Level", range = "linear(-24, 0)", default = 0.0, unit = "dB")]
         pub unison_level: FloatParam,
-        #[param(name = "Unison Pan", range = "linear(-50, 50)", default = 0.0)]
+        #[param(name = "U.Pan", range = "linear(-50, 50)", default = 0.0)]
         pub unison_pan: FloatParam,
 
+        // Harmony 1
         #[param(name = "H1 Scale", default = 2)]
         pub h1_scale: EnumParam<ScaleChoice>,
         #[param(name = "H1 On", default = true)]
         pub h1_on: BoolParam,
         #[param(name = "H1 Dual", default = false)]
         pub h1_dual: BoolParam,
-        #[param(name = "H1 Random", range = "linear(0, 100)", default = 25.0)]
+        #[param(name = "H1 Rand", range = "linear(0, 100)", default = 25.0)]
         pub h1_random: FloatParam,
-        #[param(name = "H1 Formant", range = "linear(-50, 50)", default = -15.0)]
+        #[param(name = "H1 Form", range = "linear(-50, 50)", default = -15.0)]
         pub h1_formant: FloatParam,
-        #[param(name = "H1 Quantise", range = "linear(0, 100)", default = 35.0)]
+        #[param(name = "H1 Quant", range = "linear(0, 100)", default = 35.0)]
         pub h1_quantise: FloatParam,
         #[param(name = "H1 Level", range = "linear(-24, 0)", default = -6.0, unit = "dB")]
         pub h1_level: FloatParam,
         #[param(name = "H1 Pan", range = "linear(-50, 50)", default = -30.0)]
         pub h1_pan: FloatParam,
 
+        // Harmony 2
         #[param(name = "H2 Scale", default = 19)]
         pub h2_scale: EnumParam<ScaleChoice>,
         #[param(name = "H2 On", default = false)]
         pub h2_on: BoolParam,
         #[param(name = "H2 Dual", default = false)]
         pub h2_dual: BoolParam,
-        #[param(name = "H2 Random", range = "linear(0, 100)", default = 20.0)]
+        #[param(name = "H2 Rand", range = "linear(0, 100)", default = 20.0)]
         pub h2_random: FloatParam,
-        #[param(name = "H2 Formant", range = "linear(-50, 50)", default = 0.0)]
+        #[param(name = "H2 Form", range = "linear(-50, 50)", default = 0.0)]
         pub h2_formant: FloatParam,
-        #[param(name = "H2 Quantise", range = "linear(0, 100)", default = 25.0)]
+        #[param(name = "H2 Quant", range = "linear(0, 100)", default = 25.0)]
         pub h2_quantise: FloatParam,
         #[param(name = "H2 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")]
         pub h2_level: FloatParam,
         #[param(name = "H2 Pan", range = "linear(-50, 50)", default = 10.0)]
         pub h2_pan: FloatParam,
 
+        // Harmony 3
         #[param(name = "H3 Scale", default = 20)]
         pub h3_scale: EnumParam<ScaleChoice>,
         #[param(name = "H3 On", default = true)]
         pub h3_on: BoolParam,
         #[param(name = "H3 Dual", default = true)]
         pub h3_dual: BoolParam,
-        #[param(name = "H3 Random", range = "linear(0, 100)", default = 35.0)]
+        #[param(name = "H3 Rand", range = "linear(0, 100)", default = 35.0)]
         pub h3_random: FloatParam,
-        #[param(name = "H3 Formant", range = "linear(-50, 50)", default = 10.0)]
+        #[param(name = "H3 Form", range = "linear(-50, 50)", default = 10.0)]
         pub h3_formant: FloatParam,
-        #[param(name = "H3 Quantise", range = "linear(0, 100)", default = 35.0)]
+        #[param(name = "H3 Quant", range = "linear(0, 100)", default = 35.0)]
         pub h3_quantise: FloatParam,
         #[param(name = "H3 Level", range = "linear(-24, 0)", default = -7.0, unit = "dB")]
         pub h3_level: FloatParam,
         #[param(name = "H3 Pan", range = "linear(-50, 50)", default = 25.0)]
         pub h3_pan: FloatParam,
 
+        // Harmony 4
         #[param(name = "H4 Scale", default = 27)]
         pub h4_scale: EnumParam<ScaleChoice>,
         #[param(name = "H4 On", default = true)]
         pub h4_on: BoolParam,
         #[param(name = "H4 Dual", default = true)]
         pub h4_dual: BoolParam,
-        #[param(name = "H4 Random", range = "linear(0, 100)", default = 35.0)]
+        #[param(name = "H4 Rand", range = "linear(0, 100)", default = 35.0)]
         pub h4_random: FloatParam,
-        #[param(name = "H4 Formant", range = "linear(-50, 50)", default = 18.0)]
+        #[param(name = "H4 Form", range = "linear(-50, 50)", default = 18.0)]
         pub h4_formant: FloatParam,
-        #[param(name = "H4 Quantise", range = "linear(0, 100)", default = 35.0)]
+        #[param(name = "H4 Quant", range = "linear(0, 100)", default = 35.0)]
         pub h4_quantise: FloatParam,
         #[param(name = "H4 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")]
         pub h4_level: FloatParam,
@@ -1149,6 +1320,13 @@ pub mod truce_integration {
         ) -> ProcessStatus {
             let p = &mut state.core.params;
             p.key = params.key.value() as u8;
+            p.midi_mode = match params.midi_mode.value() {
+                MidiModeChoice::AutoChordOrMultiCh => MidiHarmonyMode::AutoChordOrMultiCh,
+                MidiModeChoice::MonoChannels => MidiHarmonyMode::MonoChannels,
+                MidiModeChoice::WaitAll => MidiHarmonyMode::WaitAll,
+                MidiModeChoice::Priority => MidiHarmonyMode::Priority,
+                MidiModeChoice::FlexiChord => MidiHarmonyMode::FlexiChord,
+            };
             p.midi_base_channel = params.midi_ch.value() as u8;
             p.tune_hz = params.tune.read();
             p.input_gain_db = params.input_gain.read();
@@ -1229,7 +1407,13 @@ pub mod truce_integration {
                 }
             }
 
-            let n = buffer.num_samples().min(state.mono_scratch.len());
+            let n = buffer.num_samples();
+            if state.mono_scratch.len() < n {
+                state.mono_scratch.resize(n, 0.0);
+                state.out_l_scratch.resize(n, 0.0);
+                state.out_r_scratch.resize(n, 0.0);
+            }
+
             let in_l = buffer.input(0);
             state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
 
@@ -1267,40 +1451,42 @@ pub mod truce_integration {
             ProcessStatus::Normal
         }
 
+        /// Interface vertical (1 voz por linha) com tamanho estritamente fixo.
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
                 section(
                     "GLOBAL & INPUT",
                     vec![
-                        toggle(P::Link, "Link"),
-                        knob(P::InputGain, "Input dB"),
-                        meter(&[P::MeterIn], "In"),
                         dropdown(P::Key, "Key"),
+                        dropdown(P::MidiMode, "MIDI Mode"),
                         knob(P::MidiCh, "MIDI Ch"),
                         knob(P::Tune, "Tune Hz"),
-                        meter(&[P::MeterOutL, P::MeterOutR], "Out"),
+                        knob(P::InputGain, "In Gain"),
+                        meter(&[P::MeterIn], "In"),
                     ],
                 ),
                 section(
                     "DIRECT & UNISON",
                     vec![
                         toggle(P::DirectOn, "Direct"),
-                        knob(P::DirectLevel, "Dir dB"),
+                        knob(P::DirectLevel, "Dir Lev"),
                         knob(P::DirectPan, "Dir Pan"),
+                        toggle(P::Link, "Link"),
                         toggle(P::UnisonOn, "Unison"),
-                        knob(P::UnisonRandom, "Uni Rand"),
-                        knob(P::UnisonFormant, "Uni Form"),
-                        knob(P::UnisonQuantise, "Uni Quant"),
-                        knob(P::UnisonLevel, "Uni dB"),
-                        knob(P::UnisonPan, "Uni Pan"),
+                        knob(P::UnisonRandom, "U.Rand"),
+                        knob(P::UnisonFormant, "U.Form"),
+                        knob(P::UnisonQuantise, "U.Quant"),
+                        knob(P::UnisonLevel, "U.Level"),
+                        knob(P::UnisonPan, "U.Pan"),
+                        meter(&[P::MeterOutL, P::MeterOutR], "Out"),
                     ],
                 ),
                 section(
                     "HARMONY 1",
                     vec![
-                        dropdown(P::H1Scale, "Scale").cols(2),
                         toggle(P::H1On, "On"),
                         toggle(P::H1Dual, "Dual"),
+                        knob(P::H1Scale, "Scale").cols(2),
                         knob(P::H1Random, "Random"),
                         knob(P::H1Formant, "Formant"),
                         knob(P::H1Quantise, "Quantise"),
@@ -1311,9 +1497,9 @@ pub mod truce_integration {
                 section(
                     "HARMONY 2",
                     vec![
-                        dropdown(P::H2Scale, "Scale").cols(2),
                         toggle(P::H2On, "On"),
                         toggle(P::H2Dual, "Dual"),
+                        knob(P::H2Scale, "Scale").cols(2),
                         knob(P::H2Random, "Random"),
                         knob(P::H2Formant, "Formant"),
                         knob(P::H2Quantise, "Quantise"),
@@ -1324,9 +1510,9 @@ pub mod truce_integration {
                 section(
                     "HARMONY 3",
                     vec![
-                        dropdown(P::H3Scale, "Scale").cols(2),
                         toggle(P::H3On, "On"),
                         toggle(P::H3Dual, "Dual"),
+                        knob(P::H3Scale, "Scale").cols(2),
                         knob(P::H3Random, "Random"),
                         knob(P::H3Formant, "Formant"),
                         knob(P::H3Quantise, "Quantise"),
@@ -1337,9 +1523,9 @@ pub mod truce_integration {
                 section(
                     "HARMONY 4",
                     vec![
-                        dropdown(P::H4Scale, "Scale").cols(2),
                         toggle(P::H4On, "On"),
                         toggle(P::H4Dual, "Dual"),
+                        knob(P::H4Scale, "Scale").cols(2),
                         knob(P::H4Random, "Random"),
                         knob(P::H4Formant, "Formant"),
                         knob(P::H4Quantise, "Quantise"),
@@ -1349,7 +1535,6 @@ pub mod truce_integration {
                 ),
             ])
             .with_title("CHORUSVOX DECABUDDY")
-            .resizable(true)
             .into_editor(&params)
         }
     }
