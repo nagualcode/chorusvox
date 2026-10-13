@@ -4,9 +4,9 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    gain_db_to_lin, lookahead_samples_for_sr, max_grain_for_sr, out_delay_for_sr,
-    pan50_to_gains, soft_saturate, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp,
-    PitchTracker, PsolaSubVoice, RING_MASK, RING_SIZE,
+    akai_preamp_saturate, gain_db_to_lin, lookahead_samples_for_sr, max_grain_for_sr,
+    out_delay_for_sr, pan50_to_gains, soft_saturate, voice_db_to_lin, BiquadLowpass,
+    HarmonyChannelDsp, PitchTracker, PsolaSubVoice, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -342,14 +342,15 @@ impl DecaBuddyProcessor {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(8000.0);
         let mut lp = BiquadLowpass::default();
-        lp.set_cutoff(400.0, sr);
+        lp.set_cutoff(310.96, sr);
         let pitch = PitchTracker::new(sr);
 
         let max_grain = max_grain_for_sr(sr);
         let lookahead = lookahead_samples_for_sr(sr);
         let out_delay = out_delay_for_sr(sr);
         let min_t0 = ((20.0 * (sr / 44_100.0)).round() as usize).max(2);
-        let max_t0 = ((600.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
+        // Suporta fundamentais graves ate ~42 Hz sem saturar o periodo t0
+        let max_t0 = ((1050.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
 
         let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
@@ -375,7 +376,7 @@ impl DecaBuddyProcessor {
             pitch,
             latest_mark: init_write.wrapping_sub(lookahead),
             voiced_env: 0.0,
-            unison_dsp: PsolaSubVoice::new(101),
+            unison_dsp: PsolaSubVoice::new(101).with_dual_warmth(),
             harmony_dsp: [
                 HarmonyChannelDsp::new(201),
                 HarmonyChannelDsp::new(301),
@@ -412,14 +413,14 @@ impl DecaBuddyProcessor {
 
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(8000.0);
-        self.lp_filter.set_cutoff(400.0, self.sample_rate);
+        self.lp_filter.set_cutoff(310.96, self.sample_rate);
         self.pitch.set_sample_rate(self.sample_rate);
 
         self.max_grain = max_grain_for_sr(self.sample_rate);
         self.lookahead = lookahead_samples_for_sr(self.sample_rate);
         self.out_delay = out_delay_for_sr(self.sample_rate);
         self.min_t0 = ((20.0 * (self.sample_rate / 44_100.0)).round() as usize).max(2);
-        self.max_t0 = ((600.0 * (self.sample_rate / 44_100.0)).round() as usize)
+        self.max_t0 = ((1050.0 * (self.sample_rate / 44_100.0)).round() as usize)
             .clamp(self.min_t0 + 1, self.max_grain / 2);
 
         self.reset();
@@ -823,7 +824,8 @@ impl DecaBuddyProcessor {
         let mut peak = 0.0_f32;
 
         for i in 0..n {
-            let x = input_mono[i] * in_gain;
+            // Estagio de saturacao analogica suave do pre-amp Akai HV10
+            let x = akai_preamp_saturate(input_mono[i] * in_gain);
             peak = peak.max(x.abs());
 
             let w_idx = self.write_pos & RING_MASK;
@@ -842,7 +844,8 @@ impl DecaBuddyProcessor {
                     self.params.tune_hz,
                 );
                 if self.pitch.voiced {
-                    let cutoff = (self.pitch.current_f0 * 2.2).clamp(250.0, 1500.0);
+                    // Cutoff acompanha o 1o formante (163.64 Hz a 900 Hz da DLL) para isolar o corpo glotal
+                    let cutoff = (self.pitch.current_f0 * 1.85).clamp(163.64, 950.0);
                     self.lp_filter.set_cutoff(cutoff, self.sample_rate);
 
                     let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
@@ -916,6 +919,7 @@ impl DecaBuddyProcessor {
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample(
                     &self.dry_ring,
+                    &self.lp_ring,
                     &self.hann_lut,
                     read_pos,
                     emit_pos,
@@ -968,6 +972,7 @@ impl DecaBuddyProcessor {
 
                 let y_main = self.harmony_dsp[v_idx].main.step_sample(
                     &self.dry_ring,
+                    &self.lp_ring,
                     &self.hann_lut,
                     read_pos,
                     emit_pos,
@@ -988,6 +993,7 @@ impl DecaBuddyProcessor {
                 if pv.dual {
                     let y_dual = self.harmony_dsp[v_idx].dual.step_sample(
                         &self.dry_ring,
+                        &self.lp_ring,
                         &self.hann_lut,
                         read_pos,
                         emit_pos,
@@ -1025,7 +1031,7 @@ impl DecaBuddyProcessor {
 
     #[inline]
     fn update_epoch_marks(&mut self, read_pos: usize) {
-        if !self.pitch.voiced || self.pitch.current_f0 <= 50.0 {
+        if !self.pitch.voiced || self.pitch.current_f0 <= 38.0 {
             self.latest_mark = read_pos;
             return;
         }
@@ -1574,7 +1580,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.3")
+            .with_title("CHORUSVOX DECABUDDY v0.2.4")
             .into_editor(&params)
         }
     }

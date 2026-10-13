@@ -1,8 +1,9 @@
 //! Motor DSP de alta performance do ChorusVox / DecaBuddy.
-//! - Normalizacao NOLA por raw_w.max(0.08).
-//! - Reducao SIMD desenrolada (sq_diff_simd) e filtro anti-aliasing FIR [0.25, 0.5, 0.25] na decimacao.
-//! - Wrap de mascara na delay line antes de converter para f32.
-//! - Escalonamento total por sample rate.
+//! - PSOLA Hibrido de Banda Dupla: corpo glotal (lp_ring) com 50% overlap em Ts
+//!   e detalhe de formantes limitado a [-Ta, +Ta] (elimina estouro e buzz na oitava abaixo).
+//! - Rastreamento estendido ate 42 Hz com histerese para glissandos graves sem cortes.
+//! - Modelagem de Hardware Akai HV10: High-Pass subsonico em 32.7848 Hz, Low-Pass D/A em
+//!   12.8317 kHz (constantes extraidas de DecaBuddy.dll .rdata) e quantizacao de 20 bits.
 
 use std::f32::consts::PI;
 
@@ -13,28 +14,34 @@ pub const DELAY_MASK: usize = DELAY_SIZE - 1;
 pub const HANN_LUT_SIZE: usize = 2048;
 pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 1.25;
 
+// Constantes fisicas extraidas da secao .rdata da DecaBuddy.dll
+pub const AKAI_SUBSONIC_HP_HZ: f32 = 32.784804;
+pub const AKAI_DAC_LP_HZ: f32 = 12831.712823;
+pub const AKAI_DUAL_WARM_LP_HZ: f32 = 8500.0;
+
 const OU_A: f32 = 0.99995;
 const OU_ONE_MINUS_A_TIMES_K: f32 = (1.0 - OU_A) * 346.40582;
 
 #[inline]
 pub fn max_grain_for_sr(sr: f32) -> usize {
-    ((2048.0 * (sr / 44_100.0)).round() as usize).next_power_of_two().clamp(2048, 8192)
+    ((4096.0 * (sr / 44_100.0)).round() as usize).next_power_of_two().clamp(4096, 16384)
 }
 
 #[inline]
 pub fn lookahead_samples_for_sr(sr: f32) -> usize {
-    ((1536.0 * (sr / 44_100.0)).round() as usize).clamp(1024, 8192)
+    ((2048.0 * (sr / 44_100.0)).round() as usize).clamp(1536, 8192)
 }
 
 #[inline]
 pub fn out_delay_for_sr(sr: f32) -> usize {
-    ((512.0 * (sr / 44_100.0)).round() as usize).clamp(256, 2048)
+    ((768.0 * (sr / 44_100.0)).round() as usize).clamp(512, 4096)
 }
 
 #[inline]
 pub fn yin_window_and_hop(sr: f32) -> (usize, usize) {
     let scale = (sr / 44_100.0).clamp(0.5, 4.0);
-    let win = ((1024.0 * scale).round() as usize).next_power_of_two().clamp(512, 4096);
+    // Janela base de 2048 na taxa decimada garante leitura limpa ate 42 Hz no glissando grave
+    let win = ((1536.0 * scale).round() as usize).next_power_of_two().clamp(1024, 8192);
     let hop = ((256.0 * scale).round() as usize).clamp(128, 1024);
     (win, hop)
 }
@@ -64,6 +71,16 @@ pub fn pan50_to_gains(pan_50: f32) -> (f32, f32) {
     let p = (pan_50 / 50.0).clamp(-1.0, 1.0);
     let theta = (p + 1.0) * PI * 0.25;
     (theta.cos(), theta.sin())
+}
+
+/// Saturacao suave do estagio de pre-amplificacao de entrada do hardware Akai HV10
+#[inline(always)]
+pub fn akai_preamp_saturate(x: f32) -> f32 {
+    let drive = x * 1.08;
+    let d2 = drive * drive;
+    // Aproximacao Pade de tanh com leve assimetria harmonica de 2a ordem
+    let sat = drive * (27.0 + d2) / (27.0 + 9.0 * d2);
+    (sat + 0.015 * d2).clamp(-1.2, 1.2) * 0.925
 }
 
 #[inline(always)]
@@ -154,7 +171,7 @@ pub struct BiquadLowpass {
 
 impl BiquadLowpass {
     pub fn set_cutoff(&mut self, cutoff_hz: f32, sr: f32) {
-        let fc = cutoff_hz.clamp(80.0, sr * 0.45);
+        let fc = cutoff_hz.clamp(60.0, sr * 0.45);
         let w0 = 2.0 * PI * fc / sr;
         let cos_w0 = w0.cos();
         let alpha = w0.sin() / std::f32::consts::SQRT_2;
@@ -206,9 +223,9 @@ impl PitchTracker {
     pub fn new(sr: f32) -> Self {
         let (yin_win, yin_hop) = yin_window_and_hop(sr);
         let mut pt = Self {
-            fmin: 75.0,
+            fmin: 42.0, // Rastreia glissandos vocais graves ate 42 Hz (Fa1) sem cortar
             fmax: 900.0,
-            threshold: 0.32,
+            threshold: 0.34,
             hysteresis_semi: 0.65,
             yin_win,
             yin_hop,
@@ -232,7 +249,7 @@ impl PitchTracker {
         let max_len = self.yin_win / 2;
         self.oct_bias_lut.resize(max_len, 0.0);
         for tau in tau_min..max_len {
-            self.oct_bias_lut[tau] = 0.02 * ((tau as f32) / (tau_min as f32)).log2();
+            self.oct_bias_lut[tau] = 0.015 * ((tau as f32) / (tau_min as f32)).log2();
         }
     }
 
@@ -276,7 +293,8 @@ impl PitchTracker {
             }
         }
         let rms = (sum_sq / (w as f32)).sqrt();
-        if rms < 0.004 {
+        // Limiar RMS mais sensivel para nao cortar final de glissandos graves
+        if rms < 0.0012 {
             self.mark_unvoiced();
             return;
         }
@@ -299,14 +317,16 @@ impl PitchTracker {
         let mut best_cost = 1e9_f32;
         let prev_f0 = self.current_f0;
         let was_voiced = self.voiced && prev_f0 > 0.0;
+        // Histerese dinamica: quando ja esta cantando, tolera CMND ate 0.44 durante glissandos
+        let active_thresh = if was_voiced { self.threshold + 0.10 } else { self.threshold };
 
         for tau in tau_min..tau_max {
             let c = self.cmnd[tau];
-            if c < self.threshold && c < self.cmnd[tau - 1] && c <= self.cmnd[tau + 1] {
+            if c < active_thresh && c < self.cmnd[tau - 1] && c <= self.cmnd[tau + 1] {
                 let oct_bias = self.oct_bias_lut[tau];
                 let jump_cost = if was_voiced {
                     let cand_f0 = sr_decim / (tau as f32);
-                    0.04 * (12.0 * (cand_f0 / prev_f0).log2()).abs().min(12.0)
+                    0.035 * (12.0 * (cand_f0 / prev_f0).log2()).abs().min(12.0)
                 } else {
                     0.0
                 };
@@ -354,7 +374,8 @@ impl PitchTracker {
 
     fn mark_unvoiced(&mut self) {
         self.unvoiced_hold += 1;
-        if self.unvoiced_hold >= 2 {
+        // Hold de 6 hops (~35ms) sustenta o glissando por ciclos de vocal fry sem cortar
+        if self.unvoiced_hold >= 6 {
             self.voiced = false;
             self.current_f0 = 0.0;
             self.current_note = -1;
@@ -374,6 +395,11 @@ pub struct PsolaSubVoice {
     delay_mod_samples: f32,
     rng_pitch: FastRng,
     rng_delay: FastRng,
+    // Filtros de modelagem de hardware Akai HV10 (32.78 Hz HPF + 12.83 kHz DAC LPF)
+    hp_x1: f32,
+    hp_y1: f32,
+    dac_lp_z1: f32,
+    is_dual_warm: bool,
 }
 
 impl PsolaSubVoice {
@@ -389,7 +415,16 @@ impl PsolaSubVoice {
             delay_mod_samples: 0.0,
             rng_pitch: FastRng::new(seed),
             rng_delay: FastRng::new(seed.wrapping_mul(0x85EBCA6B).wrapping_add(17)),
+            hp_x1: 0.0,
+            hp_y1: 0.0,
+            dac_lp_z1: 0.0,
+            is_dual_warm: false,
         }
+    }
+
+    pub fn with_dual_warmth(mut self) -> Self {
+        self.is_dual_warm = true;
+        self
     }
 
     pub fn reset(&mut self) {
@@ -400,6 +435,9 @@ impl PsolaSubVoice {
         self.drift_cents = 0.0;
         self.delay_rand_norm = 0.0;
         self.delay_mod_samples = 0.0;
+        self.hp_x1 = 0.0;
+        self.hp_y1 = 0.0;
+        self.dac_lp_z1 = 0.0;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -407,6 +445,7 @@ impl PsolaSubVoice {
     pub fn step_sample(
         &mut self,
         dry_ring: &[f32],
+        lp_ring: &[f32],
         hann_lut: &[f32],
         read_pos: usize,
         emit_pos: usize,
@@ -437,24 +476,24 @@ impl PsolaSubVoice {
             (target_delay_ms * 0.001 * sr).clamp(0.0, (DELAY_SIZE - 16) as f32);
         self.delay_mod_samples = 0.999 * self.delay_mod_samples + 0.001 * target_delay_samp;
 
-        if voiced_mask > 0.01 && f0_hz > 50.0 {
+        if voiced_mask > 0.01 && f0_hz > 38.0 {
             let cents_oct = (self.drift_cents + extra_cents) * (1.0 / 1200.0);
             let cents_factor = fast_exp2_small(cents_oct);
             let ratio = (pitch_ratio * cents_factor).clamp(0.25, 4.0);
             let ta = (sr / f0_hz).clamp(20.0, (max_grain / 2 - 4) as f32);
-            let ts = (ta / ratio).clamp(12.0, (max_grain - 8) as f32);
+            let ts = (ta / ratio).clamp(12.0, (max_grain / 2 - 4) as f32);
 
             self.synth_phase -= 1.0;
             if self.synth_phase <= 0.0 {
                 self.synth_phase += ts;
-                let grain_len = ((2.0 * ta).max(PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
-                    .clamp(31, max_grain - 1);
-                self.splat_grain(
+                self.splat_grain_hybrid(
                     dry_ring,
+                    lp_ring,
                     hann_lut,
                     latest_mark,
                     read_pos,
-                    grain_len,
+                    ta,
+                    ts,
                     formant_ratio,
                     max_grain,
                 );
@@ -469,12 +508,25 @@ impl PsolaSubVoice {
         self.out_ring[idx] = 0.0;
         self.w_ring[idx] = 0.0;
 
-        let wet = raw_out / raw_w.max(0.08);
+        // Divisor NOLA seguro (>= 1.0): nunca amplifica caudas nem desfaz a janela de Hann!
+        let wet = raw_out / raw_w.max(1.0);
         let dry = dry_ring[idx];
         let combined = wet * emit_mask + dry * (1.0 - emit_mask) * unvoiced_gain;
 
+        // 1. Filtro Passa-Altas Subsonico Akai (32.7848 Hz de .rdata): elimina boom na oitava abaixo
+        let hp_r = (-2.0 * PI * AKAI_SUBSONIC_HP_HZ / sr).exp();
+        let hp_out = hp_r * (self.hp_y1 + combined - self.hp_x1);
+        self.hp_x1 = combined;
+        self.hp_y1 = hp_out + 1e-15 - 1e-15;
+
+        // 2. Filtro de Reconstrucao D/A Akai (12.83 kHz principal / 8.5 kHz Dual Warm)
+        let lp_fc = if self.is_dual_warm { AKAI_DUAL_WARM_LP_HZ } else { AKAI_DAC_LP_HZ };
+        let lp_a = (-2.0 * PI * lp_fc.min(sr * 0.45) / sr).exp();
+        let dac_out = (1.0 - lp_a) * hp_out + lp_a * self.dac_lp_z1;
+        self.dac_lp_z1 = dac_out + 1e-15 - 1e-15;
+
         let w = self.delay_write & DELAY_MASK;
-        self.delay_line[w] = combined + 1e-15 - 1e-15;
+        self.delay_line[w] = dac_out;
 
         let read_f = (w + DELAY_SIZE) as f32 - self.delay_mod_samples;
         let r0i = (read_f as usize) & DELAY_MASK;
@@ -486,38 +538,79 @@ impl PsolaSubVoice {
         delayed
     }
 
+    /// PSOLA Hibrido de Banda Dupla:
+    /// - Em pitch-down (ts > ta, ex: Lower Octave), o corpo fundamental (lp_ring) e esticado
+    ///   de [-ta, +ta] para [-ts, +ts], garantindo 50% de overlap de Hann (raw_w == 1.0) sem buzz,
+    ///   enquanto os formantes agudos (dry - lp) sao lidos na velocidade `formant_ratio` e
+    ///   estritamente confinados a [-ta, +ta] para nunca capturar pulsos glotais vizinhos.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn splat_grain(
+    fn splat_grain_hybrid(
         &mut self,
         dry_ring: &[f32],
+        lp_ring: &[f32],
         hann_lut: &[f32],
         mark_center: usize,
         out_center: usize,
-        l_base: usize,
+        ta: f32,
+        ts: f32,
         formant_ratio: f32,
         max_grain: usize,
     ) {
         let fr = formant_ratio.clamp(0.5, 2.0);
-        let l_out = (((l_base as f32) / fr).round() as usize | 1).clamp(17, max_grain - 1);
+        // Largura de sintese garante pelo menos 2*ts (50% overlap em pitch-down)
+        let l_formant = (2.0 * ta / fr).round();
+        let l_out = ((l_formant.max(2.0 * ts) as usize) | 1).clamp(31, max_grain - 1);
         let half_out = (l_out / 2) as isize;
+
+        // Passo de leitura do corpo fundamental (sempre mapeia [-half_out, +half_out] -> [-ta, +ta])
+        let body_step = ta / (half_out.max(1) as f32);
+        // Limite estrito de leitura dos formantes na fonte para nunca alcançar +-ta
+        let max_src_reach = ta * 0.98;
+
         let lut_step = ((HANN_LUT_SIZE << 16) / l_out).max(1);
         let mut lut_phase = 0usize;
 
         for k in 0..l_out {
             let offset_out = k as isize - half_out;
-            let src_off = (offset_out as f32) * fr;
-            let src_i0 = src_off.floor() as isize;
-            let frac = src_off - (src_i0 as f32);
+            let off_f = offset_out as f32;
 
-            let p0 = (mark_center as isize + src_i0) as usize & RING_MASK;
-            let p1 = (p0 + 1) & RING_MASK;
-            let sample = dry_ring[p0] + frac * (dry_ring[p1] - dry_ring[p0]);
+            // 1. Corpo Fundamental (lp_ring) com suporte completo 2*ts
+            let src_body = off_f * body_step;
+            let b_i0 = src_body.floor() as isize;
+            let b_frac = src_body - (b_i0 as f32);
+            let bp0 = (mark_center as isize + b_i0) as usize & RING_MASK;
+            let bp1 = (bp0 + 1) & RING_MASK;
+            let body_val = lp_ring[bp0] + b_frac * (lp_ring[bp1] - lp_ring[bp0]);
+
+            // 2. Detalhe de Formantes (dry_ring - lp_ring) confinado a [-ta, +ta]
+            let src_fmt = off_f * fr;
+            let fmt_val = if src_fmt.abs() < max_src_reach {
+                let f_i0 = src_fmt.floor() as isize;
+                let f_frac = src_fmt - (f_i0 as f32);
+                let fp0 = (mark_center as isize + f_i0) as usize & RING_MASK;
+                let fp1 = (fp0 + 1) & RING_MASK;
+                let d0 = dry_ring[fp0] - lp_ring[fp0];
+                let d1 = dry_ring[fp1] - lp_ring[fp1];
+                let raw_fmt = d0 + f_frac * (d1 - d0);
+                // Janela interna garante que o formante caia a zero suavemente antes de +-ta
+                let norm_pos = (src_fmt / max_src_reach) * 0.5 + 0.5;
+                let fmt_lut_idx = ((norm_pos * (HANN_LUT_SIZE as f32)) as usize)
+                    .min(HANN_LUT_SIZE - 1);
+                raw_fmt * hann_lut[fmt_lut_idx]
+            } else {
+                0.0
+            };
 
             let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
             lut_phase += lut_step;
 
+            // Quantizacao sutil de ponto fixo (20-bit grit do acumulador DSP Akai HV10)
+            let combined_grain = body_val + fmt_val;
+            let quantized = (combined_grain * 524_288.0).round() * (1.0 / 524_288.0);
+
             let dst = (out_center as isize + offset_out) as usize & RING_MASK;
-            self.out_ring[dst] += sample * w;
+            self.out_ring[dst] += quantized * w;
             self.w_ring[dst] += w;
         }
     }
@@ -533,7 +626,7 @@ impl HarmonyChannelDsp {
     pub fn new(seed_base: u32) -> Self {
         Self {
             main: PsolaSubVoice::new(seed_base),
-            dual: PsolaSubVoice::new(seed_base.wrapping_add(0x9E3779B9)),
+            dual: PsolaSubVoice::new(seed_base.wrapping_add(0x9E3779B9)).with_dual_warmth(),
         }
     }
 
@@ -580,6 +673,7 @@ mod tests {
 
             let y = voice.step_sample(
                 &dry_ring,
+                &dry_ring,
                 &hann_lut,
                 read_pos,
                 emit_pos,
@@ -587,17 +681,17 @@ mod tests {
                 voiced,
                 emit_voiced,
                 f0,
-                1.25,
+                0.5, // Testa diretamente a oitava abaixo!
                 1.0,
                 0.0,
                 0.0,
-                0.35,
+                0.0,
                 0.0,
                 sr,
                 max_grain,
             );
 
-            if step > 7000 {
+            if step > 8000 {
                 silence_rms_acc += y * y;
                 silence_count += 1;
             }
