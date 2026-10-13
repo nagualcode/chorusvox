@@ -1,9 +1,9 @@
-//! Motor DSP de alta performance do ChorusVox / DecaBuddy.
-//! - PSOLA Hibrido de Banda Dupla: corpo glotal (lp_ring) com 50% overlap em Ts
-//!   e detalhe de formantes limitado a [-Ta, +Ta] (elimina estouro e buzz na oitava abaixo).
-//! - Rastreamento estendido ate 42 Hz com histerese para glissandos graves sem cortes.
-//! - Modelagem de Hardware Akai HV10: High-Pass subsonico em 32.7848 Hz, Low-Pass D/A em
-//!   12.8317 kHz (constantes extraidas de DecaBuddy.dll .rdata) e quantizacao de 20 bits.
+//! Motor DSP e Modelagem de Hardware do ChorusVox / Akai HV10 DecaBuddy.
+//! - Transistores discretos 2SC3330 (TR1-TR3) + Diodos de silicio 1SS133T-77 (D1-D4).
+//! - Op-Amps JRC NJM4558L (IC12, IC13, IC14, IC402) com slew-rate limiting e rail de 9V DC.
+//! - DSP Analog Devices ADSP-2186MKST-300 (IC1): quantizacao 16-bit Q15 + dither TPDF e MAC 40-bit.
+//! - Codec Burr-Brown PCM3003E (IC3) + Filtros de reconstrucao e subsonico de 32.7848 Hz.
+//! - PSOLA Hibrido de Banda Dupla com rastreamento estendido ate 42 Hz para glissandos graves.
 
 use std::f32::consts::PI;
 
@@ -12,12 +12,12 @@ pub const RING_MASK: usize = RING_SIZE - 1;
 pub const DELAY_SIZE: usize = 16384;
 pub const DELAY_MASK: usize = DELAY_SIZE - 1;
 pub const HANN_LUT_SIZE: usize = 2048;
-pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 1.25;
 
-// Constantes fisicas extraidas da secao .rdata da DecaBuddy.dll
+// Constantes extraidas da secao .rdata da DecaBuddy.dll e do Manual de Servico HV10
 pub const AKAI_SUBSONIC_HP_HZ: f32 = 32.784804;
 pub const AKAI_DAC_LP_HZ: f32 = 12831.712823;
 pub const AKAI_DUAL_WARM_LP_HZ: f32 = 8500.0;
+pub const PCM3003_RECON_LP_HZ: f32 = 16800.0;
 
 const OU_A: f32 = 0.99995;
 const OU_ONE_MINUS_A_TIMES_K: f32 = (1.0 - OU_A) * 346.40582;
@@ -40,7 +40,6 @@ pub fn out_delay_for_sr(sr: f32) -> usize {
 #[inline]
 pub fn yin_window_and_hop(sr: f32) -> (usize, usize) {
     let scale = (sr / 44_100.0).clamp(0.5, 4.0);
-    // Janela base de 2048 na taxa decimada garante leitura limpa ate 42 Hz no glissando grave
     let win = ((1536.0 * scale).round() as usize).next_power_of_two().clamp(1024, 8192);
     let hop = ((256.0 * scale).round() as usize).clamp(128, 1024);
     (win, hop)
@@ -73,27 +72,55 @@ pub fn pan50_to_gains(pan_50: f32) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
-/// Saturacao suave do estagio de pre-amplificacao de entrada do hardware Akai HV10
+/// Simula o estagio de entrada discreto com transistores NPN 2SC3330 (TR1-TR3)
+/// e os diodos de protecao/clipping de silicio 1SS133T-77 (D1-D4, D101, D102).
 #[inline(always)]
-pub fn akai_preamp_saturate(x: f32) -> f32 {
-    let drive = x * 1.08;
+pub fn akai_input_stage_2sc3330(x: f32) -> f32 {
+    // 1. Assimetria exponencial de juncao BJT 2SC3330 (gera 2o harmonico sutil)
+    let biased = x + 0.018 * x * x;
+    // 2. Joelho de conducao dos diodos de silicio 1SS133T-77 (~0.62V normalizado)
+    let drive = biased * 1.06;
     let d2 = drive * drive;
-    // Aproximacao Pade de tanh com leve assimetria harmonica de 2a ordem
-    let sat = drive * (27.0 + d2) / (27.0 + 9.0 * d2);
-    (sat + 0.015 * d2).clamp(-1.2, 1.2) * 0.925
+    let diode_clipped = drive * (27.0 + d2) / (27.0 + 9.0 * d2);
+    diode_clipped * 0.94
 }
 
-#[inline(always)]
-pub fn soft_saturate(x: f32) -> f32 {
-    const THRESHOLD: f32 = 0.75;
-    if x > THRESHOLD {
-        let over = x - THRESHOLD;
-        THRESHOLD + (1.0 - THRESHOLD) * (over / (1.0 + over))
-    } else if x < -THRESHOLD {
-        let under = -x - THRESHOLD;
-        -(THRESHOLD + (1.0 - THRESHOLD) * (under / (1.0 + under)))
-    } else {
-        x
+/// Estagio de amplificador operacional JRC NJM4558L (IC12, IC13, IC14, IC402)
+/// alimentado por barramento simples de 9V DC (headroom reduzido + slew-rate limiting).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Njm4558Stage {
+    prev_out: f32,
+    lp_z1: f32,
+}
+
+impl Njm4558Stage {
+    pub fn reset(&mut self) {
+        self.prev_out = 0.0;
+        self.lp_z1 = 0.0;
+    }
+
+    #[inline(always)]
+    pub fn process(&mut self, x: f32, max_slew: f32, bw_alpha: f32) -> f32 {
+        // 1. Limitacao de slew-rate (1.0 V/us do NJM4558L suaviza transientes agressivos)
+        let delta = (x - self.prev_out).clamp(-max_slew, max_slew);
+        let slewed = self.prev_out + delta;
+        self.prev_out = slewed + 1e-15 - 1e-15;
+
+        // 2. Polo dominante da largura de banda do op-amp
+        let filtered = (1.0 - bw_alpha) * slewed + bw_alpha * self.lp_z1;
+        self.lp_z1 = filtered + 1e-15 - 1e-15;
+
+        // 3. Compressao assimétrica de fonte simples de 9V DC (meia-tensao virtual Vcc/2)
+        if filtered > 0.76 {
+            let over = filtered - 0.76;
+            0.76 + 0.24 * (over / (1.0 + over * 1.15))
+        } else if filtered < -0.72 {
+            // Rail negativo próximo ao terra satura levemente mais cedo em fonte simples de 9V
+            let under = -filtered - 0.72;
+            -(0.72 + 0.26 * (under / (1.0 + under * 1.25)))
+        } else {
+            filtered
+        }
     }
 }
 
@@ -183,6 +210,11 @@ impl BiquadLowpass {
         self.a2 = (1.0 - alpha) / a0;
     }
 
+    pub fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+
     #[inline(always)]
     pub fn process(&mut self, x: f32) -> f32 {
         let mut y = self.b0 * x + self.z1;
@@ -223,7 +255,7 @@ impl PitchTracker {
     pub fn new(sr: f32) -> Self {
         let (yin_win, yin_hop) = yin_window_and_hop(sr);
         let mut pt = Self {
-            fmin: 42.0, // Rastreia glissandos vocais graves ate 42 Hz (Fa1) sem cortar
+            fmin: 42.0,
             fmax: 900.0,
             threshold: 0.34,
             hysteresis_semi: 0.65,
@@ -293,7 +325,6 @@ impl PitchTracker {
             }
         }
         let rms = (sum_sq / (w as f32)).sqrt();
-        // Limiar RMS mais sensivel para nao cortar final de glissandos graves
         if rms < 0.0012 {
             self.mark_unvoiced();
             return;
@@ -317,7 +348,6 @@ impl PitchTracker {
         let mut best_cost = 1e9_f32;
         let prev_f0 = self.current_f0;
         let was_voiced = self.voiced && prev_f0 > 0.0;
-        // Histerese dinamica: quando ja esta cantando, tolera CMND ate 0.44 durante glissandos
         let active_thresh = if was_voiced { self.threshold + 0.10 } else { self.threshold };
 
         for tau in tau_min..tau_max {
@@ -374,7 +404,6 @@ impl PitchTracker {
 
     fn mark_unvoiced(&mut self) {
         self.unvoiced_hold += 1;
-        // Hold de 6 hops (~35ms) sustenta o glissando por ciclos de vocal fry sem cortar
         if self.unvoiced_hold >= 6 {
             self.voiced = false;
             self.current_f0 = 0.0;
@@ -395,7 +424,7 @@ pub struct PsolaSubVoice {
     delay_mod_samples: f32,
     rng_pitch: FastRng,
     rng_delay: FastRng,
-    // Filtros de modelagem de hardware Akai HV10 (32.78 Hz HPF + 12.83 kHz DAC LPF)
+    rng_dither: FastRng,
     hp_x1: f32,
     hp_y1: f32,
     dac_lp_z1: f32,
@@ -415,6 +444,7 @@ impl PsolaSubVoice {
             delay_mod_samples: 0.0,
             rng_pitch: FastRng::new(seed),
             rng_delay: FastRng::new(seed.wrapping_mul(0x85EBCA6B).wrapping_add(17)),
+            rng_dither: FastRng::new(seed.wrapping_mul(0xC2B2AE35).wrapping_add(31)),
             hp_x1: 0.0,
             hp_y1: 0.0,
             dac_lp_z1: 0.0,
@@ -508,12 +538,11 @@ impl PsolaSubVoice {
         self.out_ring[idx] = 0.0;
         self.w_ring[idx] = 0.0;
 
-        // Divisor NOLA seguro (>= 1.0): nunca amplifica caudas nem desfaz a janela de Hann!
         let wet = raw_out / raw_w.max(1.0);
         let dry = dry_ring[idx];
         let combined = wet * emit_mask + dry * (1.0 - emit_mask) * unvoiced_gain;
 
-        // 1. Filtro Passa-Altas Subsonico Akai (32.7848 Hz de .rdata): elimina boom na oitava abaixo
+        // 1. Filtro Passa-Altas Subsonico Akai (32.7848 Hz de .rdata)
         let hp_r = (-2.0 * PI * AKAI_SUBSONIC_HP_HZ / sr).exp();
         let hp_out = hp_r * (self.hp_y1 + combined - self.hp_x1);
         self.hp_x1 = combined;
@@ -538,11 +567,6 @@ impl PsolaSubVoice {
         delayed
     }
 
-    /// PSOLA Hibrido de Banda Dupla:
-    /// - Em pitch-down (ts > ta, ex: Lower Octave), o corpo fundamental (lp_ring) e esticado
-    ///   de [-ta, +ta] para [-ts, +ts], garantindo 50% de overlap de Hann (raw_w == 1.0) sem buzz,
-    ///   enquanto os formantes agudos (dry - lp) sao lidos na velocidade `formant_ratio` e
-    ///   estritamente confinados a [-ta, +ta] para nunca capturar pulsos glotais vizinhos.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     fn splat_grain_hybrid(
@@ -558,14 +582,11 @@ impl PsolaSubVoice {
         max_grain: usize,
     ) {
         let fr = formant_ratio.clamp(0.5, 2.0);
-        // Largura de sintese garante pelo menos 2*ts (50% overlap em pitch-down)
         let l_formant = (2.0 * ta / fr).round();
         let l_out = ((l_formant.max(2.0 * ts) as usize) | 1).clamp(31, max_grain - 1);
         let half_out = (l_out / 2) as isize;
 
-        // Passo de leitura do corpo fundamental (sempre mapeia [-half_out, +half_out] -> [-ta, +ta])
         let body_step = ta / (half_out.max(1) as f32);
-        // Limite estrito de leitura dos formantes na fonte para nunca alcançar +-ta
         let max_src_reach = ta * 0.98;
 
         let lut_step = ((HANN_LUT_SIZE << 16) / l_out).max(1);
@@ -593,7 +614,6 @@ impl PsolaSubVoice {
                 let d0 = dry_ring[fp0] - lp_ring[fp0];
                 let d1 = dry_ring[fp1] - lp_ring[fp1];
                 let raw_fmt = d0 + f_frac * (d1 - d0);
-                // Janela interna garante que o formante caia a zero suavemente antes de +-ta
                 let norm_pos = (src_fmt / max_src_reach) * 0.5 + 0.5;
                 let fmt_lut_idx = ((norm_pos * (HANN_LUT_SIZE as f32)) as usize)
                     .min(HANN_LUT_SIZE - 1);
@@ -605,12 +625,14 @@ impl PsolaSubVoice {
             let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
             lut_phase += lut_step;
 
-            // Quantizacao sutil de ponto fixo (20-bit grit do acumulador DSP Akai HV10)
+            // 3. Aritmetica 16-bit Fixed-Point (Q15) do ADSP-2186MKST-300 (IC1) + TPDF Dither
             let combined_grain = body_val + fmt_val;
-            let quantized = (combined_grain * 524_288.0).round() * (1.0 / 524_288.0);
+            let dither = (self.rng_dither.next_bipolar() + self.rng_dither.next_bipolar()) * 0.25;
+            let q15 = (combined_grain * 32_768.0 + dither).round() * (1.0 / 32_768.0);
 
             let dst = (out_center as isize + offset_out) as usize & RING_MASK;
-            self.out_ring[dst] += quantized * w;
+            // Acumulador MAC de 40 bits com headroom estendido
+            self.out_ring[dst] = (self.out_ring[dst] + q15 * w).clamp(-3.99, 3.99);
             self.w_ring[dst] += w;
         }
     }
@@ -681,7 +703,7 @@ mod tests {
                 voiced,
                 emit_voiced,
                 f0,
-                0.5, // Testa diretamente a oitava abaixo!
+                0.5,
                 1.0,
                 0.0,
                 0.0,

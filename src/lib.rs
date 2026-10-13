@@ -4,9 +4,9 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    akai_preamp_saturate, gain_db_to_lin, lookahead_samples_for_sr, max_grain_for_sr,
-    out_delay_for_sr, pan50_to_gains, soft_saturate, voice_db_to_lin, BiquadLowpass,
-    HarmonyChannelDsp, PitchTracker, PsolaSubVoice, RING_MASK, RING_SIZE,
+    akai_input_stage_2sc3330, gain_db_to_lin, lookahead_samples_for_sr, max_grain_for_sr,
+    out_delay_for_sr, pan50_to_gains, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp,
+    Njm4558Stage, PitchTracker, PsolaSubVoice, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -306,6 +306,16 @@ pub struct DecaBuddyProcessor {
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
 
+    // Componentes fisicos modelados do Manual de Servico Akai HV10
+    input_opamp_ic12: Njm4558Stage,
+    output_opamp_l_ic13: Njm4558Stage,
+    output_opamp_r_ic14: Njm4558Stage,
+    pcm3003_recon_l: BiquadLowpass,
+    pcm3003_recon_r: BiquadLowpass,
+    nju7032_env: f32,
+    njm4558_max_slew: f32,
+    njm4558_bw_alpha: f32,
+
     latest_mark: usize,
     voiced_env: f32,
 
@@ -345,15 +355,23 @@ impl DecaBuddyProcessor {
         lp.set_cutoff(310.96, sr);
         let pitch = PitchTracker::new(sr);
 
+        let mut recon_l = BiquadLowpass::default();
+        let mut recon_r = BiquadLowpass::default();
+        recon_l.set_cutoff(PCM3003_RECON_LP_HZ, sr);
+        recon_r.set_cutoff(PCM3003_RECON_LP_HZ, sr);
+
         let max_grain = max_grain_for_sr(sr);
         let lookahead = lookahead_samples_for_sr(sr);
         let out_delay = out_delay_for_sr(sr);
         let min_t0 = ((20.0 * (sr / 44_100.0)).round() as usize).max(2);
-        // Suporta fundamentais graves ate ~42 Hz sem saturar o periodo t0
         let max_t0 = ((1050.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
 
         let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
+
+        // Slew-rate do NJM4558L (~1.0 V/us escalado para excursao normalizada em 9V DC)
+        let njm4558_max_slew = (0.58 * (44_100.0 / sr)).clamp(0.08, 0.85);
+        let njm4558_bw_alpha = (-2.0 * std::f32::consts::PI * 18_500.0_f32.min(sr * 0.45) / sr).exp();
 
         Self {
             sample_rate: sr,
@@ -374,6 +392,14 @@ impl DecaBuddyProcessor {
             hop_counter: 0,
             lp_filter: lp,
             pitch,
+            input_opamp_ic12: Njm4558Stage::default(),
+            output_opamp_l_ic13: Njm4558Stage::default(),
+            output_opamp_r_ic14: Njm4558Stage::default(),
+            pcm3003_recon_l: recon_l,
+            pcm3003_recon_r: recon_r,
+            nju7032_env: 0.0,
+            njm4558_max_slew,
+            njm4558_bw_alpha,
             latest_mark: init_write.wrapping_sub(lookahead),
             voiced_env: 0.0,
             unison_dsp: PsolaSubVoice::new(101).with_dual_warmth(),
@@ -414,7 +440,12 @@ impl DecaBuddyProcessor {
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(8000.0);
         self.lp_filter.set_cutoff(310.96, self.sample_rate);
+        self.pcm3003_recon_l.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
+        self.pcm3003_recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
         self.pitch.set_sample_rate(self.sample_rate);
+
+        self.njm4558_max_slew = (0.58 * (44_100.0 / self.sample_rate)).clamp(0.08, 0.85);
+        self.njm4558_bw_alpha = (-2.0 * std::f32::consts::PI * 18_500.0_f32.min(self.sample_rate * 0.45) / self.sample_rate).exp();
 
         self.max_grain = max_grain_for_sr(self.sample_rate);
         self.lookahead = lookahead_samples_for_sr(self.sample_rate);
@@ -431,6 +462,12 @@ impl DecaBuddyProcessor {
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
         self.pitch.reset();
+        self.input_opamp_ic12.reset();
+        self.output_opamp_l_ic13.reset();
+        self.output_opamp_r_ic14.reset();
+        self.pcm3003_recon_l.reset();
+        self.pcm3003_recon_r.reset();
+        self.nju7032_env = 0.0;
         self.write_pos = self.lookahead * 2 + self.out_delay;
         self.latest_mark = self.write_pos.wrapping_sub(self.lookahead);
         self.hop_counter = 0;
@@ -821,12 +858,21 @@ impl DecaBuddyProcessor {
             };
         }
 
-        let mut peak = 0.0_f32;
+        let max_slew = self.njm4558_max_slew;
+        let bw_alpha = self.njm4558_bw_alpha;
 
         for i in 0..n {
-            // Estagio de saturacao analogica suave do pre-amp Akai HV10
-            let x = akai_preamp_saturate(input_mono[i] * in_gain);
-            peak = peak.max(x.abs());
+            // 1. Estagio de entrada discreto 2SC3330 (TR1-TR3) + 1SS133 (D1-D4) + Op-Amp NJM4558L (IC12)
+            let pre_bjt = akai_input_stage_2sc3330(input_mono[i] * in_gain);
+            let x = self.input_opamp_ic12.process(pre_bjt, max_slew, bw_alpha);
+
+            // Detector de envelope balistico NJU7032D (IC401) para os 3 LEDs frontais
+            let abs_x = x.abs();
+            if abs_x > self.nju7032_env {
+                self.nju7032_env = 0.92 * self.nju7032_env + 0.08 * abs_x;
+            } else {
+                self.nju7032_env = 0.9995 * self.nju7032_env + 0.0005 * abs_x;
+            }
 
             let w_idx = self.write_pos & RING_MASK;
             self.dry_ring[w_idx] = x;
@@ -844,7 +890,6 @@ impl DecaBuddyProcessor {
                     self.params.tune_hz,
                 );
                 if self.pitch.voiced {
-                    // Cutoff acompanha o 1o formante (163.64 Hz a 900 Hz da DLL) para isolar o corpo glotal
                     let cutoff = (self.pitch.current_f0 * 1.85).clamp(163.64, 950.0);
                     self.lp_filter.set_cutoff(cutoff, self.sample_rate);
 
@@ -1018,15 +1063,18 @@ impl DecaBuddyProcessor {
                 }
             }
 
-            out_l[i] = soft_saturate(mix_l * self.master_gain_smooth);
-            out_r[i] = soft_saturate(mix_r * self.master_gain_smooth);
+            // 2. Reconstrucao analogica PCM3003E (IC3) + Indutores L1/L2 + Saida NJM4558L 9V (IC13/IC14)
+            let recon_l = self.pcm3003_recon_l.process(mix_l * self.master_gain_smooth);
+            let recon_r = self.pcm3003_recon_r.process(mix_r * self.master_gain_smooth);
+            out_l[i] = self.output_opamp_l_ic13.process(recon_l, max_slew, bw_alpha);
+            out_r[i] = self.output_opamp_r_ic14.process(recon_r, max_slew, bw_alpha);
 
             self.write_pos = self.write_pos.wrapping_add(1);
         }
 
-        self.leds.led_neg12 = peak >= 0.251;
-        self.leds.led_neg6 = peak >= 0.501;
-        self.leds.led_0_over = peak >= 0.980;
+        self.leds.led_neg12 = self.nju7032_env >= 0.251;
+        self.leds.led_neg6 = self.nju7032_env >= 0.501;
+        self.leds.led_0_over = self.nju7032_env >= 0.950;
     }
 
     #[inline]
@@ -1580,7 +1628,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.4")
+            .with_title("CHORUSVOX DECABUDDY v0.2.5")
             .into_editor(&params)
         }
     }
