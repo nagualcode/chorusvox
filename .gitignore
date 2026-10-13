@@ -1,4 +1,5 @@
-.DS_Store
+
 *.wav
 do.py
+do2.py
 target/

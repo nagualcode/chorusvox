@@ -1,33 +1,40 @@
-//! Motor DSP do ChorusVox / DecaBuddy.
-//! - Normalizacao NOLA por raw_w.max(0.08) evitando o buzz na oitava abaixo.
-//! - Lookahead seguro (LOOKAHEAD_SAMPLES) evitando colisao com o cabecote de gravacao.
-//! - Protecao anti-denormal nos filtros e delay lines.
-//! - Soft-clipper transparente com threshold assintotico em 0.75 (-2.5 dBFS).
+//! Motor DSP de alta performance do ChorusVox / DecaBuddy.
+//! - Normalizacao NOLA por raw_w.max(0.08) eliminando o buzz na oitava abaixo.
+//! - Reducao SIMD desenrolada (sq_diff_simd) para analise YIN instantanea.
+//! - Mascara de delay em wrap circular antes da conversao para f32 (precisao perene).
+//! - Escalonamento total com sample_rate (suporte a 44.1k, 48k, 96k, 192k).
 
 use std::f32::consts::PI;
 
-pub const RING_SIZE: usize = 16384;
+pub const RING_SIZE: usize = 32768;
 pub const RING_MASK: usize = RING_SIZE - 1;
-pub const MAX_GRAIN: usize = 2048;
+pub const DELAY_SIZE: usize = 16384;
+pub const DELAY_MASK: usize = DELAY_SIZE - 1;
 pub const HANN_LUT_SIZE: usize = 2048;
-
-// Lookahead suficiente para que mesmo na nota mais grave (f0=65Hz, T0=680, grao=1360)
-// o cabecote de leitura de graos nunca ultrapasse a posicao de gravacao atual.
-pub const LOOKAHEAD_SAMPLES: usize = 1536;
-pub const OUT_DELAY: usize = 512;
-pub const TOTAL_LATENCY: usize = LOOKAHEAD_SAMPLES + OUT_DELAY; // 2048 amostras (~46.4ms a 44.1k)
-
 pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 1.25;
 
 const OU_A: f32 = 0.99995;
 const OU_ONE_MINUS_A_TIMES_K: f32 = (1.0 - OU_A) * 346.40582;
 
 #[inline]
+pub fn max_grain_for_sr(sr: f32) -> usize {
+    ((2048.0 * (sr / 44_100.0)).round() as usize).next_power_of_two().clamp(2048, 8192)
+}
+
+#[inline]
+pub fn lookahead_samples_for_sr(sr: f32) -> usize {
+    ((1536.0 * (sr / 44_100.0)).round() as usize).clamp(1024, 8192)
+}
+
+#[inline]
+pub fn out_delay_for_sr(sr: f32) -> usize {
+    ((512.0 * (sr / 44_100.0)).round() as usize).clamp(256, 2048)
+}
+
+#[inline]
 pub fn yin_window_and_hop(sr: f32) -> (usize, usize) {
     let scale = (sr / 44_100.0).clamp(0.5, 4.0);
-    let win = ((1024.0 * scale).round() as usize)
-        .next_power_of_two()
-        .clamp(512, 4096);
+    let win = ((1024.0 * scale).round() as usize).next_power_of_two().clamp(512, 4096);
     let hop = ((256.0 * scale).round() as usize).clamp(128, 1024);
     (win, hop)
 }
@@ -44,11 +51,7 @@ pub fn fast_exp2_small(x: f32) -> f32 {
 
 #[inline]
 pub fn voice_db_to_lin(db: f32) -> f32 {
-    if db <= -23.95 {
-        0.0
-    } else {
-        10.0_f32.powf(db * 0.05)
-    }
+    if db <= -23.95 { 0.0 } else { 10.0_f32.powf(db * 0.05) }
 }
 
 #[inline]
@@ -84,6 +87,30 @@ pub fn build_hann_lut() -> Vec<f32> {
         *slot = 0.5 * (1.0 - (2.0 * PI * (k as f32) * inv).cos());
     }
     lut
+}
+
+#[inline(always)]
+fn sq_diff_simd(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0_f32; 8];
+    let ca = a.chunks_exact(8);
+    let cb = b.chunks_exact(8);
+    let tail: f32 = ca
+        .remainder()
+        .iter()
+        .zip(cb.remainder())
+        .map(|(&x, &y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum();
+
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            let d = x[k] - y[k];
+            acc[k] += d * d;
+        }
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -255,11 +282,7 @@ impl PitchTracker {
         let base_slice = &self.decim_buf[0..w];
         for tau in 1..=tau_max {
             let shifted_slice = &self.decim_buf[tau..tau + w];
-            let mut diff = 0.0_f32;
-            for (&a, &b) in base_slice.iter().zip(shifted_slice.iter()) {
-                let d = a - b;
-                diff += d * d;
-            }
+            let diff = sq_diff_simd(base_slice, shifted_slice);
             running_sum += diff;
             self.cmnd[tau] = if running_sum > 1e-12 {
                 diff * (tau as f32) / running_sum
@@ -335,9 +358,6 @@ impl PitchTracker {
     }
 }
 
-const DELAY_SIZE: usize = 8192;
-const DELAY_MASK: usize = DELAY_SIZE - 1;
-
 #[derive(Clone, Debug)]
 pub struct PsolaSubVoice {
     out_ring: Vec<f32>,
@@ -409,21 +429,23 @@ impl PsolaSubVoice {
         let jitter_ms = (self.delay_rand_norm * 0.5 + 0.5).clamp(0.0, 1.5) * (16.0 * random_norm);
         let target_delay_ms = jitter_ms + extra_delay_ms;
         let target_delay_samp =
-            (target_delay_ms * 0.001 * sr).clamp(0.0, (DELAY_SIZE - 8) as f32);
+            (target_delay_ms * 0.001 * sr).clamp(0.0, (DELAY_SIZE - 16) as f32);
         self.delay_mod_samples = 0.999 * self.delay_mod_samples + 0.001 * target_delay_samp;
+
+        let max_grain = max_grain_for_sr(sr);
 
         if voiced_mask > 0.01 && f0_hz > 50.0 {
             let cents_oct = (self.drift_cents + extra_cents) * (1.0 / 1200.0);
             let cents_factor = fast_exp2_small(cents_oct);
             let ratio = (pitch_ratio * cents_factor).clamp(0.25, 4.0);
-            let ta = (sr / f0_hz).clamp(20.0, (MAX_GRAIN / 2 - 4) as f32);
-            let ts = (ta / ratio).clamp(12.0, (MAX_GRAIN - 8) as f32);
+            let ta = (sr / f0_hz).clamp(20.0, (max_grain / 2 - 4) as f32);
+            let ts = (ta / ratio).clamp(12.0, (max_grain - 8) as f32);
 
             self.synth_phase -= 1.0;
             if self.synth_phase <= 0.0 {
                 self.synth_phase += ts;
                 let grain_len = ((2.0 * ta).max(PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
-                    .clamp(31, MAX_GRAIN - 1);
+                    .clamp(31, max_grain - 1);
                 self.splat_grain(
                     dry_ring,
                     hann_lut,
@@ -431,6 +453,7 @@ impl PsolaSubVoice {
                     read_pos,
                     grain_len,
                     formant_ratio,
+                    max_grain,
                 );
             }
         } else {
@@ -443,19 +466,19 @@ impl PsolaSubVoice {
         self.out_ring[idx] = 0.0;
         self.w_ring[idx] = 0.0;
 
-        // Normalizacao NOLA por raw_w.max(0.08):
-        // Elimina o buzz de 46% de modulacao na oitava abaixo sem cortes quadrados!
         let wet = raw_out / raw_w.max(0.08);
         let dry = dry_ring[idx];
         let combined = wet * emit_mask + dry * (1.0 - emit_mask) * unvoiced_gain;
 
-        self.delay_line[self.delay_write & DELAY_MASK] = combined + 1e-15 - 1e-15;
-        let read_f = self.delay_write as f32 - self.delay_mod_samples;
-        let r0 = (read_f.floor() as isize) & (DELAY_MASK as isize);
-        let r1 = (r0 + 1) & (DELAY_MASK as isize);
-        let frac = read_f - read_f.floor();
-        let delayed =
-            self.delay_line[r0 as usize] * (1.0 - frac) + self.delay_line[r1 as usize] * frac;
+        let w = self.delay_write & DELAY_MASK;
+        self.delay_line[w] = combined + 1e-15 - 1e-15;
+
+        let read_f = (w + DELAY_SIZE) as f32 - self.delay_mod_samples;
+        let r0i = (read_f as usize) & DELAY_MASK;
+        let r1i = (r0i + 1) & DELAY_MASK;
+        let frac = read_f.fract();
+        let delayed = self.delay_line[r0i] * (1.0 - frac) + self.delay_line[r1i] * frac;
+
         self.delay_write = self.delay_write.wrapping_add(1);
         delayed
     }
@@ -469,9 +492,10 @@ impl PsolaSubVoice {
         out_center: usize,
         l_base: usize,
         formant_ratio: f32,
+        max_grain: usize,
     ) {
         let fr = formant_ratio.clamp(0.5, 2.0);
-        let l_out = (((l_base as f32) / fr).round() as usize | 1).clamp(17, MAX_GRAIN - 1);
+        let l_out = (((l_base as f32) / fr).round() as usize | 1).clamp(17, max_grain - 1);
         let half_out = (l_out / 2) as isize;
         let lut_step = ((HANN_LUT_SIZE << 16) / l_out).max(1);
         let mut lut_phase = 0usize;
@@ -544,15 +568,11 @@ mod tests {
             dry_ring[write_pos & RING_MASK] = x;
 
             let read_pos = write_pos.wrapping_sub(512);
-            let emit_pos = read_pos.wrapping_sub(OUT_DELAY);
+            let emit_pos = read_pos.wrapping_sub(512);
             if step < 4000 && read_pos.wrapping_sub(latest_mark) >= period {
                 latest_mark = read_pos;
             }
-            let emit_voiced = if step >= 512 + OUT_DELAY && step < 4000 + 512 + OUT_DELAY {
-                1.0
-            } else {
-                0.0
-            };
+            let emit_voiced = if step >= 1024 && step < 4000 + 1024 { 1.0 } else { 0.0 };
 
             let y = voice.step_sample(
                 &dry_ring,

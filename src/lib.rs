@@ -4,9 +4,9 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    gain_db_to_lin, pan50_to_gains, soft_saturate, voice_db_to_lin, BiquadLowpass,
-    HarmonyChannelDsp, PitchTracker, PsolaSubVoice, LOOKAHEAD_SAMPLES, OUT_DELAY, RING_MASK,
-    RING_SIZE, TOTAL_LATENCY,
+    gain_db_to_lin, lookahead_samples_for_sr, out_delay_for_sr, pan50_to_gains,
+    soft_saturate, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp, PitchTracker,
+    PsolaSubVoice, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -286,6 +286,7 @@ struct VoiceSlewState {
     gain_smooth: f32,
     gl_smooth: f32,
     gr_smooth: f32,
+    was_active: bool,
 }
 
 pub struct DecaBuddyProcessor {
@@ -316,14 +317,18 @@ pub struct DecaBuddyProcessor {
     chord_notes_fifo: [u8; 16],
     chord_notes_len: usize,
 
-    // Suavizacao por amostra de ganho/pan (evita clicks e zipper noise)
     harmony_slew: [VoiceSlewState; 4],
+    cached_pitch_ratio: [f32; 4],
+    cached_formant_ratio: [f32; 4],
+    cached_uni_ratio: f32,
+
     dir_gain_smooth: f32,
     dir_gl_smooth: f32,
     dir_gr_smooth: f32,
     uni_gain_smooth: f32,
     uni_gl_smooth: f32,
     uni_gr_smooth: f32,
+    uni_was_active: bool,
     master_gain_smooth: f32,
 }
 
@@ -333,7 +338,9 @@ impl DecaBuddyProcessor {
         let mut lp = BiquadLowpass::default();
         lp.set_cutoff(400.0, sr);
         let pitch = PitchTracker::new(sr);
-        let init_write = LOOKAHEAD_SAMPLES * 2 + OUT_DELAY;
+        let lookahead = lookahead_samples_for_sr(sr);
+        let out_delay = out_delay_for_sr(sr);
+        let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
 
         Self {
@@ -355,7 +362,7 @@ impl DecaBuddyProcessor {
             hop_counter: 0,
             lp_filter: lp,
             pitch,
-            latest_mark: init_write.wrapping_sub(LOOKAHEAD_SAMPLES),
+            latest_mark: init_write.wrapping_sub(lookahead),
             voiced_env: 0.0,
             unison_dsp: PsolaSubVoice::new(101),
             harmony_dsp: [
@@ -369,18 +376,22 @@ impl DecaBuddyProcessor {
             chord_notes_fifo: [0; 16],
             chord_notes_len: 0,
             harmony_slew: [VoiceSlewState::default(); 4],
+            cached_pitch_ratio: [1.0; 4],
+            cached_formant_ratio: [1.0; 4],
+            cached_uni_ratio: 1.0,
             dir_gain_smooth: 1.0,
             dir_gl_smooth: 0.707,
             dir_gr_smooth: 0.707,
             uni_gain_smooth: 0.0,
             uni_gl_smooth: 0.707,
             uni_gr_smooth: 0.707,
+            uni_was_active: false,
             master_gain_smooth: 1.0,
         }
     }
 
     pub fn latency_samples(&self) -> u32 {
-        TOTAL_LATENCY as u32
+        (lookahead_samples_for_sr(self.sample_rate) + out_delay_for_sr(self.sample_rate)) as u32
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
@@ -391,12 +402,14 @@ impl DecaBuddyProcessor {
     }
 
     pub fn reset(&mut self) {
+        let lookahead = lookahead_samples_for_sr(self.sample_rate);
+        let out_delay = out_delay_for_sr(self.sample_rate);
         self.dry_ring.fill(0.0);
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
         self.pitch.reset();
-        self.write_pos = LOOKAHEAD_SAMPLES * 2 + OUT_DELAY;
-        self.latest_mark = self.write_pos.wrapping_sub(LOOKAHEAD_SAMPLES);
+        self.write_pos = lookahead * 2 + out_delay;
+        self.latest_mark = self.write_pos.wrapping_sub(lookahead);
         self.hop_counter = 0;
         self.voiced_env = 0.0;
         self.unison_dsp.reset();
@@ -409,12 +422,16 @@ impl DecaBuddyProcessor {
         for s in &mut self.harmony_slew {
             *s = VoiceSlewState::default();
         }
+        self.cached_pitch_ratio = [1.0; 4];
+        self.cached_formant_ratio = [1.0; 4];
+        self.cached_uni_ratio = 1.0;
         self.dir_gain_smooth = 1.0;
         self.dir_gl_smooth = 0.707;
         self.dir_gr_smooth = 0.707;
         self.uni_gain_smooth = 0.0;
         self.uni_gl_smooth = 0.707;
         self.uni_gr_smooth = 0.707;
+        self.uni_was_active = false;
         self.master_gain_smooth = 1.0;
     }
 
@@ -486,8 +503,7 @@ impl DecaBuddyProcessor {
             47..=94 => {
                 let u_idx = (index - 47) / 12;
                 let step = (index - 47) % 12;
-                self.scale_bank
-                    .set_user_step_raw(u_idx, step, val.round() as i8);
+                self.scale_bank.set_user_step_raw(u_idx, step, val.round() as i8);
             }
             _ => return false,
         }
@@ -693,8 +709,13 @@ impl DecaBuddyProcessor {
         self.refresh_midi_targets();
 
         let in_gain = gain_db_to_lin(self.params.input_gain_db);
-        let target_master_gain = if self.params.bypass { 1.0 } else { voice_db_to_lin(self.params.master_level_db) };
-        let half_yin = self.pitch.yin_win / 2;
+        let target_master_gain = if self.params.bypass {
+            1.0
+        } else {
+            voice_db_to_lin(self.params.master_level_db)
+        };
+        let lookahead = lookahead_samples_for_sr(self.sample_rate);
+        let out_delay = out_delay_for_sr(self.sample_rate);
         let yin_hop = self.pitch.yin_hop;
 
         let target_dir_gain = if !self.params.bypass && self.params.direct.enabled {
@@ -712,7 +733,6 @@ impl DecaBuddyProcessor {
             0.0
         };
         let (uni_target_gl, uni_target_gr) = pan50_to_gains(self.params.unison.pan);
-        let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
         let uni_formant_ratio = 2.0_f32.powf((self.params.unison.formant * 0.09) / 12.0);
         let uni_rand_norm = (self.params.unison.random * 0.01).clamp(0.0, 1.0);
 
@@ -725,7 +745,6 @@ impl DecaBuddyProcessor {
             target_gr: f32,
             d_gl: f32,
             d_gr: f32,
-            formant_ratio: f32,
             dual_formant_ratio: f32,
             rand_norm: f32,
             base_delay_ms: f32,
@@ -739,7 +758,6 @@ impl DecaBuddyProcessor {
             target_gr: 0.0,
             d_gl: 0.0,
             d_gr: 0.0,
-            formant_ratio: 1.0,
             dual_formant_ratio: 1.0,
             rand_norm: 0.0,
             base_delay_ms: 0.0,
@@ -763,7 +781,6 @@ impl DecaBuddyProcessor {
             };
             let (gl, gr) = pan50_to_gains(vp.pan);
             let (d_gl, d_gr) = pan50_to_gains(-vp.pan);
-            let formant_ratio = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
             let dual_formant_ratio = 2.0_f32.powf(((vp.formant * 0.09) + 0.2) / 12.0);
             let rand_norm = (vp.random * 0.01).clamp(0.0, 1.0);
             let base_delay_ms = (v_idx as f32 + 1.0) * 4.5 * rand_norm;
@@ -777,7 +794,6 @@ impl DecaBuddyProcessor {
                 target_gr: gr,
                 d_gl,
                 d_gr,
-                formant_ratio,
                 dual_formant_ratio,
                 rand_norm,
                 base_delay_ms,
@@ -809,11 +825,34 @@ impl DecaBuddyProcessor {
                     let cutoff = (self.pitch.current_f0 * 2.2).clamp(250.0, 1500.0);
                     self.lp_filter.set_cutoff(cutoff, self.sample_rate);
 
-                    // Sincroniza epoch mark com o pico inicial do onset
+                    // Atualiza razoes de pitch e formantes estritamente na taxa de controle
+                    let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
+                    let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
+                    self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
+
+                    for v_idx in 0..4 {
+                        let vp = if self.params.link && v_idx > 0 {
+                            self.params.harmonies[0]
+                        } else {
+                            self.params.harmonies[v_idx]
+                        };
+                        self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
+                        self.cached_pitch_ratio[v_idx] = if let Some(shift) =
+                            self.compute_voice_shift_semitones(v_idx, &vp)
+                        {
+                            2.0_f32.powf(shift / 12.0)
+                        } else {
+                            1.0
+                        };
+                    }
+
                     if !was_voiced {
-                        let t0 = (self.sample_rate / self.pitch.current_f0).clamp(20.0, 600.0) as usize;
+                        let max_t0 = (600.0 * (self.sample_rate / 44_100.0)).round() as usize;
+                        let min_t0 = (20.0 * (self.sample_rate / 44_100.0)).round() as usize;
+                        let t0 = (self.sample_rate / self.pitch.current_f0)
+                            .clamp(min_t0 as f32, max_t0 as f32) as usize;
                         let r = (t0 / 2).max(2);
-                        let center = self.write_pos.wrapping_sub(LOOKAHEAD_SAMPLES);
+                        let center = self.write_pos.wrapping_sub(lookahead);
                         let mut best_p = center;
                         let mut best_v = -1e9_f32;
                         for k in 0..(2 * r + 1) {
@@ -832,15 +871,14 @@ impl DecaBuddyProcessor {
             let target_mask = if self.pitch.voiced { 1.0 } else { 0.0 };
             self.voiced_env = 0.992 * self.voiced_env + 0.008 * target_mask;
 
-            let read_pos = self.write_pos.wrapping_sub(LOOKAHEAD_SAMPLES);
+            let read_pos = self.write_pos.wrapping_sub(lookahead);
             self.mask_ring[read_pos & RING_MASK] = self.voiced_env;
-            let emit_pos = read_pos.wrapping_sub(OUT_DELAY);
+            let emit_pos = read_pos.wrapping_sub(out_delay);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
             let dry_delayed = self.dry_ring[emit_pos & RING_MASK];
 
             self.update_epoch_marks(read_pos);
 
-            // Suavizacao por amostra de parametros (elimina zipper noise e clicks de automacao)
             self.dir_gain_smooth = 0.995 * self.dir_gain_smooth + 0.005 * target_dir_gain;
             self.dir_gl_smooth = 0.995 * self.dir_gl_smooth + 0.005 * dir_target_gl;
             self.dir_gr_smooth = 0.995 * self.dir_gr_smooth + 0.005 * dir_target_gr;
@@ -854,50 +892,39 @@ impl DecaBuddyProcessor {
             let mut mix_l = dry_delayed * (self.dir_gain_smooth * self.dir_gl_smooth);
             let mut mix_r = dry_delayed * (self.dir_gain_smooth * self.dir_gr_smooth);
 
-            // Unison
-            let uni_ratio = if self.pitch.current_note >= 0 {
-                let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
-                2.0_f32.powf((-uni_q_norm * dev) / 12.0)
-            } else {
-                1.0
-            };
+            // Unison com pulo de DSP quando ocioso
+            let uni_active = self.params.unison.enabled || self.uni_gain_smooth > 1e-4;
+            if uni_active {
+                self.uni_was_active = true;
+                let y_u = self.unison_dsp.step_sample(
+                    &self.dry_ring,
+                    &self.hann_lut,
+                    read_pos,
+                    emit_pos,
+                    self.latest_mark,
+                    self.voiced_env,
+                    emit_mask,
+                    self.pitch.current_f0,
+                    self.cached_uni_ratio,
+                    uni_formant_ratio,
+                    uni_rand_norm,
+                    0.0,
+                    11.0 * uni_rand_norm,
+                    0.35,
+                    self.sample_rate,
+                );
+                mix_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
+                mix_r += y_u * (self.uni_gain_smooth * self.uni_gr_smooth);
+            } else if self.uni_was_active {
+                self.unison_dsp.reset();
+                self.uni_was_active = false;
+            }
 
-            let y_u = self.unison_dsp.step_sample(
-                &self.dry_ring,
-                &self.hann_lut,
-                read_pos,
-                emit_pos,
-                self.latest_mark,
-                self.voiced_env,
-                emit_mask,
-                self.pitch.current_f0,
-                uni_ratio,
-                uni_formant_ratio,
-                uni_rand_norm,
-                0.0,
-                11.0 * uni_rand_norm,
-                0.35,
-                self.sample_rate,
-            );
-            mix_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
-            mix_r += y_u * (self.uni_gain_smooth * self.uni_gr_smooth);
-
-            // 4 Harmonias (processamento continuo com drenagem de anel; razao de pitch por grao)
+            // 4 Harmonias com execucao estritamente ativa (sem chamada a reset() a cada amostra)
             for v_idx in 0..4 {
                 let pv = pre_voices[v_idx];
-                let vp = if self.params.link && v_idx > 0 {
-                    self.params.harmonies[0]
-                } else {
-                    self.params.harmonies[v_idx]
-                };
-
-                let pitch_ratio = if let Some(shift) = self.compute_voice_shift_semitones(v_idx, &vp) {
-                    2.0_f32.powf(shift / 12.0)
-                } else {
-                    1.0
-                };
-
                 let s = &mut self.harmony_slew[v_idx];
+
                 let target_voice_gain = if pv.enabled && self.pitch.voiced && self.pitch.current_note >= 0 {
                     pv.target_gain
                 } else {
@@ -908,7 +935,19 @@ impl DecaBuddyProcessor {
                 s.gl_smooth = 0.995 * s.gl_smooth + 0.005 * pv.target_gl;
                 s.gr_smooth = 0.995 * s.gr_smooth + 0.005 * pv.target_gr;
 
-                // unvoiced_gain = 0.0 nas harmonias para nao vazar consoantes secas fora do tom
+                let voice_active = pv.enabled || s.gain_smooth > 1e-4;
+                if !voice_active {
+                    if s.was_active {
+                        self.harmony_dsp[v_idx].reset();
+                        s.was_active = false;
+                    }
+                    continue;
+                }
+                s.was_active = true;
+
+                let pitch_ratio = self.cached_pitch_ratio[v_idx];
+                let formant_ratio = self.cached_formant_ratio[v_idx];
+
                 let y_main = self.harmony_dsp[v_idx].main.step_sample(
                     &self.dry_ring,
                     &self.hann_lut,
@@ -919,7 +958,7 @@ impl DecaBuddyProcessor {
                     emit_mask,
                     self.pitch.current_f0,
                     pitch_ratio,
-                    pv.formant_ratio,
+                    formant_ratio,
                     pv.rand_norm,
                     0.0,
                     pv.base_delay_ms,
@@ -951,14 +990,8 @@ impl DecaBuddyProcessor {
                     mix_l += y_main * (s.gain_smooth * s.gl_smooth);
                     mix_r += y_main * (s.gain_smooth * s.gr_smooth);
                 }
-
-                // Drena buffer caso voz permaneca desligada
-                if !pv.enabled && s.gain_smooth < 1e-4 {
-                    self.harmony_dsp[v_idx].reset();
-                }
             }
 
-            // Saturacao suave (soft-clip transparente com threshold em -2.5 dBFS)
             out_l[i] = soft_saturate(mix_l * self.master_gain_smooth);
             out_r[i] = soft_saturate(mix_r * self.master_gain_smooth);
 
@@ -977,7 +1010,9 @@ impl DecaBuddyProcessor {
             return;
         }
 
-        let t0 = (self.sample_rate / self.pitch.current_f0).clamp(20.0, 600.0) as usize;
+        let max_t0 = (600.0 * (self.sample_rate / 44_100.0)).round() as usize;
+        let min_t0 = (20.0 * (self.sample_rate / 44_100.0)).round() as usize;
+        let t0 = (self.sample_rate / self.pitch.current_f0).clamp(min_t0 as f32, max_t0 as f32) as usize;
         let elapsed = read_pos.wrapping_sub(self.latest_mark);
         if elapsed > RING_SIZE / 2 {
             return;
@@ -1038,7 +1073,7 @@ impl DecaBuddyProcessor {
             pcs[i] = (self.chord_notes_fifo[i] as i32).rem_euclid(12);
         }
         pcs[..len].sort_unstable();
-        
+
         let in_pc = input_note.rem_euclid(12);
         match v_idx {
             0 => {
@@ -1381,27 +1416,14 @@ pub mod truce_integration {
 
             for event in events.iter() {
                 match &event.body {
-                    EventBody::NoteOn {
-                        channel,
-                        note,
-                        velocity,
-                        ..
-                    } => {
-                        state
-                            .core
-                            .handle_midi_event(0x90 | (*channel & 0x0F), *note, *velocity);
+                    EventBody::NoteOn { channel, note, velocity, .. } => {
+                        state.core.handle_midi_event(0x90 | (*channel & 0x0F), *note, *velocity);
                     }
                     EventBody::NoteOff { channel, note, .. } => {
-                        state
-                            .core
-                            .handle_midi_event(0x80 | (*channel & 0x0F), *note, 0);
+                        state.core.handle_midi_event(0x80 | (*channel & 0x0F), *note, 0);
                     }
-                    EventBody::ControlChange {
-                        channel, cc, value, ..
-                    } => {
-                        state
-                            .core
-                            .handle_midi_event(0xB0 | (*channel & 0x0F), *cc, *value);
+                    EventBody::ControlChange { channel, cc, value, .. } => {
+                        state.core.handle_midi_event(0xB0 | (*channel & 0x0F), *cc, *value);
                     }
                     _ => {}
                 }
@@ -1415,7 +1437,14 @@ pub mod truce_integration {
             }
 
             let in_l = buffer.input(0);
-            state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
+            if buffer.num_input_channels() >= 2 {
+                let in_r = buffer.input(1);
+                for i in 0..n {
+                    state.mono_scratch[i] = 0.5 * (in_l[i] + in_r[i]);
+                }
+            } else {
+                state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
+            }
 
             state.core.process_block(
                 &state.mono_scratch[..n],
@@ -1432,15 +1461,9 @@ pub mod truce_integration {
                 }
             }
 
-            let in_pk = state.mono_scratch[..n]
-                .iter()
-                .fold(0.0_f32, |acc, &x| acc.max(x.abs()));
-            let out_l_pk = state.out_l_scratch[..n]
-                .iter()
-                .fold(0.0_f32, |acc, &x| acc.max(x.abs()));
-            let out_r_pk = state.out_r_scratch[..n]
-                .iter()
-                .fold(0.0_f32, |acc, &x| acc.max(x.abs()));
+            let in_pk = state.mono_scratch[..n].iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
+            let out_l_pk = state.out_l_scratch[..n].iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
+            let out_r_pk = state.out_r_scratch[..n].iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
 
             ctx.set_meter(P::MeterIn, in_pk);
             ctx.set_meter(P::MeterOutL, out_l_pk);
@@ -1451,7 +1474,7 @@ pub mod truce_integration {
             ProcessStatus::Normal
         }
 
-        /// Interface vertical (1 voz por linha) com tamanho estritamente fixo.
+        /// Interface vertical (1 voz por linha), tamanho estritamente fixo e versao na barra superior.
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
                 section(
@@ -1482,7 +1505,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "HARMONY 1",
+                    "VOX 1  •  HARMONY 1",
                     vec![
                         toggle(P::H1On, "On"),
                         toggle(P::H1Dual, "Dual"),
@@ -1495,7 +1518,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "HARMONY 2",
+                    "VOX 2  •  HARMONY 2",
                     vec![
                         toggle(P::H2On, "On"),
                         toggle(P::H2Dual, "Dual"),
@@ -1508,7 +1531,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "HARMONY 3",
+                    "VOX 3  •  HARMONY 3",
                     vec![
                         toggle(P::H3On, "On"),
                         toggle(P::H3Dual, "Dual"),
@@ -1521,7 +1544,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "HARMONY 4",
+                    "VOX 4  •  HARMONY 4",
                     vec![
                         toggle(P::H4On, "On"),
                         toggle(P::H4Dual, "Dual"),
@@ -1534,7 +1557,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY")
+            .with_title("CHORUSVOX DECABUDDY                                                            v0.2.0")
             .into_editor(&params)
         }
     }
