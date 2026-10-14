@@ -4,9 +4,10 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    akai_input_stage_2sc3330, gain_db_to_lin, lookahead_samples_for_sr, max_grain_for_sr,
-    out_delay_for_sr, pan50_to_gains, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp,
-    Njm4558Stage, PitchTracker, PsolaSubVoice, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
+    akai_input_stage_2sc3330, gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr,
+    lookahead_samples_for_sr, max_grain_for_sr, out_delay_for_sr, pan50_to_gains,
+    voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp, Njm4558Stage, PitchTracker,
+    PsolaSubVoice, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -199,6 +200,7 @@ impl Default for HarmonyVoiceParams {
 #[derive(Clone, Debug)]
 pub struct DecaBuddyParams {
     pub bypass: bool,
+    pub live_mode: bool,
     pub link: bool,
     pub preset: i8,
     pub key: u8,
@@ -217,6 +219,7 @@ impl Default for DecaBuddyParams {
     fn default() -> Self {
         Self {
             bypass: false,
+            live_mode: true,
             link: false,
             preset: -1,
             key: 0,
@@ -291,6 +294,7 @@ struct VoiceSlewState {
 
 pub struct DecaBuddyProcessor {
     pub sample_rate: f32,
+    pub host_offline: bool,
     pub params: DecaBuddyParams,
     pub preset_slots: [DecaBuddyParams; 4],
     pub scale_bank: ScaleBank,
@@ -306,7 +310,6 @@ pub struct DecaBuddyProcessor {
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
 
-    // Componentes fisicos modelados do Manual de Servico Akai HV10
     input_opamp_ic12: Njm4558Stage,
     output_opamp_l_ic13: Njm4558Stage,
     output_opamp_r_ic14: Njm4558Stage,
@@ -322,10 +325,15 @@ pub struct DecaBuddyProcessor {
     unison_dsp: PsolaSubVoice,
     harmony_dsp: [HarmonyChannelDsp; 4],
 
+    // Estado MIDI modernizado (Sustain CC64 + Voice Leading Memory)
     midi_target_note: [Option<u8>; 4],
     channel_note: [Option<u8>; 4],
     chord_notes_fifo: [u8; 16],
     chord_notes_len: usize,
+    sustain_pedal: bool,
+    physically_held: [bool; 128],
+    sustained_notes: [bool; 128],
+    last_flexi_shift: [Option<i32>; 4],
 
     harmony_slew: [VoiceSlewState; 4],
     cached_pitch_ratio: [f32; 4],
@@ -335,6 +343,8 @@ pub struct DecaBuddyProcessor {
     pub max_grain: usize,
     pub lookahead: usize,
     pub out_delay: usize,
+    pub live_lookahead: usize,
+    pub live_out_delay: usize,
     pub min_t0: usize,
     pub max_t0: usize,
 
@@ -363,18 +373,20 @@ impl DecaBuddyProcessor {
         let max_grain = max_grain_for_sr(sr);
         let lookahead = lookahead_samples_for_sr(sr);
         let out_delay = out_delay_for_sr(sr);
+        let live_lookahead = live_lookahead_for_sr(sr);
+        let live_out_delay = live_out_delay_for_sr(sr);
         let min_t0 = ((20.0 * (sr / 44_100.0)).round() as usize).max(2);
         let max_t0 = ((1050.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
 
         let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
 
-        // Slew-rate do NJM4558L (~1.0 V/us escalado para excursao normalizada em 9V DC)
         let njm4558_max_slew = (0.58 * (44_100.0 / sr)).clamp(0.08, 0.85);
         let njm4558_bw_alpha = (-2.0 * std::f32::consts::PI * 18_500.0_f32.min(sr * 0.45) / sr).exp();
 
         Self {
             sample_rate: sr,
+            host_offline: false,
             params: default_params.clone(),
             preset_slots: [
                 default_params.clone(),
@@ -413,6 +425,10 @@ impl DecaBuddyProcessor {
             channel_note: [None; 4],
             chord_notes_fifo: [0; 16],
             chord_notes_len: 0,
+            sustain_pedal: false,
+            physically_held: [false; 128],
+            sustained_notes: [false; 128],
+            last_flexi_shift: [None; 4],
             harmony_slew: [VoiceSlewState::default(); 4],
             cached_pitch_ratio: [1.0; 4],
             cached_formant_ratio: [1.0; 4],
@@ -420,6 +436,8 @@ impl DecaBuddyProcessor {
             max_grain,
             lookahead,
             out_delay,
+            live_lookahead,
+            live_out_delay,
             min_t0,
             max_t0,
             dir_gain_smooth: 1.0,
@@ -433,8 +451,17 @@ impl DecaBuddyProcessor {
         }
     }
 
+    #[inline]
+    pub fn is_live_low_latency(&self) -> bool {
+        self.params.live_mode && !self.host_offline
+    }
+
     pub fn latency_samples(&self) -> u32 {
-        (self.lookahead + self.out_delay) as u32
+        if self.is_live_low_latency() {
+            0
+        } else {
+            (self.lookahead + self.out_delay) as u32
+        }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
@@ -450,6 +477,8 @@ impl DecaBuddyProcessor {
         self.max_grain = max_grain_for_sr(self.sample_rate);
         self.lookahead = lookahead_samples_for_sr(self.sample_rate);
         self.out_delay = out_delay_for_sr(self.sample_rate);
+        self.live_lookahead = live_lookahead_for_sr(self.sample_rate);
+        self.live_out_delay = live_out_delay_for_sr(self.sample_rate);
         self.min_t0 = ((20.0 * (self.sample_rate / 44_100.0)).round() as usize).max(2);
         self.max_t0 = ((1050.0 * (self.sample_rate / 44_100.0)).round() as usize)
             .clamp(self.min_t0 + 1, self.max_grain / 2);
@@ -479,6 +508,10 @@ impl DecaBuddyProcessor {
         self.midi_target_note = [None; 4];
         self.channel_note = [None; 4];
         self.chord_notes_len = 0;
+        self.sustain_pedal = false;
+        self.physically_held = [false; 128];
+        self.sustained_notes = [false; 128];
+        self.last_flexi_shift = [None; 4];
         for s in &mut self.harmony_slew {
             *s = VoiceSlewState::default();
         }
@@ -629,11 +662,23 @@ impl DecaBuddyProcessor {
         false
     }
 
+    fn remove_note_from_fifo(&mut self, note: u8) {
+        let mut new_len = 0;
+        for i in 0..self.chord_notes_len {
+            if self.chord_notes_fifo[i] != note {
+                self.chord_notes_fifo[new_len] = self.chord_notes_fifo[i];
+                new_len += 1;
+            }
+        }
+        self.chord_notes_len = new_len;
+    }
+
     pub fn handle_midi_event(&mut self, status: u8, data1: u8, data2: u8) {
         let msg_type = status & 0xF0;
         let ch = status & 0x0F;
         let base_ch = self.params.midi_base_channel.saturating_sub(1) & 0x0F;
         let offset_ch = (ch + 16 - base_ch) & 0x0F;
+        let note_idx = (data1 & 0x7F) as usize;
 
         match msg_type {
             0x90 if data2 > 0 => {
@@ -641,6 +686,9 @@ impl DecaBuddyProcessor {
                     self.channel_note[offset_ch as usize] = Some(data1);
                 }
                 if ch == base_ch {
+                    self.physically_held[note_idx] = true;
+                    self.sustained_notes[note_idx] = false;
+
                     let mut found = false;
                     for i in 0..self.chord_notes_len {
                         if self.chord_notes_fifo[i] == data1 {
@@ -648,7 +696,11 @@ impl DecaBuddyProcessor {
                             break;
                         }
                     }
-                    if !found && self.chord_notes_len < 16 {
+                    if !found {
+                        if self.chord_notes_len >= 16 {
+                            self.chord_notes_fifo.copy_within(1..16, 0);
+                            self.chord_notes_len = 15;
+                        }
                         self.chord_notes_fifo[self.chord_notes_len] = data1;
                         self.chord_notes_len += 1;
                     }
@@ -658,24 +710,41 @@ impl DecaBuddyProcessor {
             0x80 | 0x90 => {
                 if (offset_ch as usize) < 4
                     && self.channel_note[offset_ch as usize] == Some(data1)
+                    && !self.sustain_pedal
                 {
                     self.channel_note[offset_ch as usize] = None;
                 }
                 if ch == base_ch {
-                    let mut new_len = 0;
-                    for i in 0..self.chord_notes_len {
-                        if self.chord_notes_fifo[i] != data1 {
-                            self.chord_notes_fifo[new_len] = self.chord_notes_fifo[i];
-                            new_len += 1;
-                        }
+                    self.physically_held[note_idx] = false;
+                    if self.sustain_pedal {
+                        self.sustained_notes[note_idx] = true;
+                    } else {
+                        self.remove_note_from_fifo(data1);
                     }
-                    self.chord_notes_len = new_len;
                 }
                 self.refresh_midi_targets();
             }
             0xB0 => {
                 let norm = (data2 as f32) / 127.0;
                 match data1 {
+                    64 => {
+                        let was_sustained = self.sustain_pedal;
+                        self.sustain_pedal = data2 >= 64;
+                        if was_sustained && !self.sustain_pedal {
+                            for n in 0..128 {
+                                if self.sustained_notes[n] && !self.physically_held[n] {
+                                    self.sustained_notes[n] = false;
+                                    self.remove_note_from_fifo(n as u8);
+                                    for ch_slot in &mut self.channel_note {
+                                        if *ch_slot == Some(n as u8) {
+                                            *ch_slot = None;
+                                        }
+                                    }
+                                }
+                            }
+                            self.refresh_midi_targets();
+                        }
+                    }
                     11 => self.params.master_level_db = -24.0 + norm * 24.0,
                     80 if data2 >= 64 => self.recall_preset_slot(0),
                     81 if data2 >= 64 => self.recall_preset_slot(1),
@@ -696,6 +765,9 @@ impl DecaBuddyProcessor {
                         self.channel_note = [None; 4];
                         self.chord_notes_len = 0;
                         self.midi_target_note = [None; 4];
+                        self.sustain_pedal = false;
+                        self.physically_held = [false; 128];
+                        self.sustained_notes = [false; 128];
                     }
                     _ => {}
                 }
@@ -774,8 +846,10 @@ impl DecaBuddyProcessor {
         } else {
             voice_db_to_lin(self.params.master_level_db)
         };
-        let lookahead = self.lookahead;
-        let out_delay = self.out_delay;
+
+        let live_low_lat = self.is_live_low_latency();
+        let active_lookahead = if live_low_lat { self.live_lookahead } else { self.lookahead };
+        let active_out_delay = if live_low_lat { self.live_out_delay } else { self.out_delay };
         let yin_hop = self.pitch.yin_hop;
 
         let target_dir_gain = if !self.params.bypass && self.params.direct.enabled {
@@ -862,11 +936,9 @@ impl DecaBuddyProcessor {
         let bw_alpha = self.njm4558_bw_alpha;
 
         for i in 0..n {
-            // 1. Estagio de entrada discreto 2SC3330 (TR1-TR3) + 1SS133 (D1-D4) + Op-Amp NJM4558L (IC12)
             let pre_bjt = akai_input_stage_2sc3330(input_mono[i] * in_gain);
             let x = self.input_opamp_ic12.process(pre_bjt, max_slew, bw_alpha);
 
-            // Detector de envelope balistico NJU7032D (IC401) para os 3 LEDs frontais
             let abs_x = x.abs();
             if abs_x > self.nju7032_env {
                 self.nju7032_env = 0.92 * self.nju7032_env + 0.08 * abs_x;
@@ -919,7 +991,7 @@ impl DecaBuddyProcessor {
                         let t0 = (self.sample_rate / self.pitch.current_f0)
                             .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
                         let r = (t0 / 2).max(2);
-                        let center = self.write_pos.wrapping_sub(lookahead);
+                        let center = self.write_pos.wrapping_sub(active_lookahead);
                         let mut best_p = center;
                         let mut best_v = -1e9_f32;
                         for k in 0..(2 * r + 1) {
@@ -938,11 +1010,12 @@ impl DecaBuddyProcessor {
             let target_mask = if self.pitch.voiced { 1.0 } else { 0.0 };
             self.voiced_env = 0.992 * self.voiced_env + 0.008 * target_mask;
 
-            let read_pos = self.write_pos.wrapping_sub(lookahead);
+            let read_pos = self.write_pos.wrapping_sub(active_lookahead);
             self.mask_ring[read_pos & RING_MASK] = self.voiced_env;
-            let emit_pos = read_pos.wrapping_sub(out_delay);
+            let emit_pos = read_pos.wrapping_sub(active_out_delay);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
-            let dry_delayed = self.dry_ring[emit_pos & RING_MASK];
+
+            let dry_signal = if live_low_lat { x } else { self.dry_ring[emit_pos & RING_MASK] };
 
             self.update_epoch_marks(read_pos);
 
@@ -956,8 +1029,8 @@ impl DecaBuddyProcessor {
 
             self.master_gain_smooth = 0.995 * self.master_gain_smooth + 0.005 * target_master_gain;
 
-            let mut mix_l = dry_delayed * (self.dir_gain_smooth * self.dir_gl_smooth);
-            let mut mix_r = dry_delayed * (self.dir_gain_smooth * self.dir_gr_smooth);
+            let mut mix_l = dry_signal * (self.dir_gain_smooth * self.dir_gl_smooth);
+            let mut mix_r = dry_signal * (self.dir_gain_smooth * self.dir_gr_smooth);
 
             let uni_active = target_uni_gain > 0.0 || self.uni_gain_smooth > 1e-4;
             if uni_active {
@@ -966,6 +1039,7 @@ impl DecaBuddyProcessor {
                     &self.dry_ring,
                     &self.lp_ring,
                     &self.hann_lut,
+                    self.write_pos,
                     read_pos,
                     emit_pos,
                     self.latest_mark,
@@ -1019,6 +1093,7 @@ impl DecaBuddyProcessor {
                     &self.dry_ring,
                     &self.lp_ring,
                     &self.hann_lut,
+                    self.write_pos,
                     read_pos,
                     emit_pos,
                     self.latest_mark,
@@ -1040,6 +1115,7 @@ impl DecaBuddyProcessor {
                         &self.dry_ring,
                         &self.lp_ring,
                         &self.hann_lut,
+                        self.write_pos,
                         read_pos,
                         emit_pos,
                         self.latest_mark,
@@ -1063,7 +1139,6 @@ impl DecaBuddyProcessor {
                 }
             }
 
-            // 2. Reconstrucao analogica PCM3003E (IC3) + Indutores L1/L2 + Saida NJM4558L 9V (IC13/IC14)
             let recon_l = self.pcm3003_recon_l.process(mix_l * self.master_gain_smooth);
             let recon_r = self.pcm3003_recon_r.process(mix_r * self.master_gain_smooth);
             out_l[i] = self.output_opamp_l_ic13.process(recon_l, max_slew, bw_alpha);
@@ -1088,6 +1163,7 @@ impl DecaBuddyProcessor {
             .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
         let elapsed = read_pos.wrapping_sub(self.latest_mark);
         if elapsed > RING_SIZE / 2 {
+            self.latest_mark = read_pos;
             return;
         }
 
@@ -1111,7 +1187,7 @@ impl DecaBuddyProcessor {
         }
     }
 
-    fn compute_voice_shift_semitones(&self, v_idx: usize, vp: &HarmonyVoiceParams) -> Option<f32> {
+    fn compute_voice_shift_semitones(&mut self, v_idx: usize, vp: &HarmonyVoiceParams) -> Option<f32> {
         if self.pitch.current_note < 0 {
             return None;
         }
@@ -1121,7 +1197,8 @@ impl DecaBuddyProcessor {
 
         if vp.scale == ScaleId::Midi {
             if self.params.midi_mode == MidiHarmonyMode::FlexiChord {
-                let shift = self.flexichord_shift(v_idx, note)?;
+                let shift = self.flexichord_jazz_shift(v_idx, note)?;
+                self.last_flexi_shift[v_idx] = Some(shift);
                 return Some((shift as f32) - q_norm * dev);
             }
             let target_midi = self.midi_target_note[v_idx]?;
@@ -1136,64 +1213,68 @@ impl DecaBuddyProcessor {
         Some(interval - q_norm * dev)
     }
 
-    fn flexichord_shift(&self, v_idx: usize, input_note: i32) -> Option<i32> {
-        if self.chord_notes_len < 3 {
+    fn flexichord_jazz_shift(&self, v_idx: usize, input_note: i32) -> Option<i32> {
+        if self.chord_notes_len == 0 {
             return None;
         }
-        let mut pcs = [0i32; 16];
         let len = self.chord_notes_len.min(16);
-        for i in 0..len {
-            pcs[i] = (self.chord_notes_fifo[i] as i32).rem_euclid(12);
+        if len == 1 {
+            return Some(self.chord_notes_fifo[0] as i32 - input_note);
         }
-        pcs[..len].sort_unstable();
 
-        let in_pc = input_note.rem_euclid(12);
-        match v_idx {
-            0 => {
-                let mut found = 0;
-                for step in 1..=12 {
-                    let cpc = (in_pc - step).rem_euclid(12);
-                    if pcs[..len].contains(&cpc) {
-                        found += 1;
-                        if found == 2 {
-                            return Some(-step);
-                        }
+        let mut chord_mask = [false; 12];
+        for i in 0..len {
+            let pc = (self.chord_notes_fifo[i] as usize) % 12;
+            chord_mask[pc] = true;
+        }
+
+        let mut unique_count = chord_mask.iter().filter(|&&b| b).count();
+        if unique_count < 3 {
+            let key_pc = (self.params.key as usize) % 12;
+            const DIATONIC: [usize; 7] = [0, 2, 4, 5, 7, 9, 11];
+            for &deg in &DIATONIC {
+                let candidate = (key_pc + deg) % 12;
+                let clashes = (chord_mask[(candidate + 1) % 12]) || (chord_mask[(candidate + 11) % 12]);
+                if !chord_mask[candidate] && !clashes {
+                    chord_mask[candidate] = true;
+                    unique_count += 1;
+                    if unique_count >= 4 {
+                        break;
                     }
                 }
-                None
-            }
-            1 => {
-                for step in 1..=12 {
-                    let cpc = (in_pc - step).rem_euclid(12);
-                    if pcs[..len].contains(&cpc) {
-                        return Some(-step);
-                    }
-                }
-                None
-            }
-            2 => {
-                for step in 1..=12 {
-                    let cpc = (in_pc + step).rem_euclid(12);
-                    if pcs[..len].contains(&cpc) {
-                        return Some(step);
-                    }
-                }
-                None
-            }
-            _ => {
-                let mut found = 0;
-                for step in 1..=12 {
-                    let cpc = (in_pc + step).rem_euclid(12);
-                    if pcs[..len].contains(&cpc) {
-                        found += 1;
-                        if found == 2 {
-                            return Some(step);
-                        }
-                    }
-                }
-                None
             }
         }
+
+        let in_pc = input_note.rem_euclid(12) as usize;
+        let (dir, target_rank) = match v_idx {
+            0 => (-1i32, 2usize),
+            1 => (-1i32, 1usize),
+            2 => (1i32, 1usize),
+            _ => (1i32, 2usize),
+        };
+
+        let mut found = 0usize;
+        let mut chosen_step = None;
+        for step in 2..=14 {
+            let offset = dir * step;
+            let cpc = (in_pc as i32 + offset).rem_euclid(12) as usize;
+            if chord_mask[cpc] {
+                found += 1;
+                if found == target_rank {
+                    chosen_step = Some(offset);
+                    break;
+                }
+            }
+        }
+
+        if let (Some(new_s), Some(prev_s)) = (chosen_step, self.last_flexi_shift[v_idx]) {
+            let prev_pc = (in_pc as i32 + prev_s).rem_euclid(12) as usize;
+            if chord_mask[prev_pc] && prev_s.abs() >= 2 && (new_s - prev_s).abs() <= 2 {
+                return Some(prev_s);
+            }
+        }
+
+        chosen_step
     }
 }
 
@@ -1274,6 +1355,8 @@ pub mod truce_integration {
         pub tune: FloatParam,
         #[param(name = "In Gain", range = "linear(-15, 15)", default = 0.0, unit = "dB")]
         pub input_gain: FloatParam,
+        #[param(name = "Live", default = true)]
+        pub live_mode: BoolParam,
         #[param(name = "Link", default = false)]
         pub link: BoolParam,
 
@@ -1408,6 +1491,7 @@ pub mod truce_integration {
         }
 
         fn reset(state: &mut Self::DspState, _params: &Self::Params, config: &AudioConfig) {
+            state.core.host_offline = config.process_mode.is_offline();
             state.core.set_sample_rate(config.sample_rate as f32);
             let max_blk = config.max_block_size.max(4096);
             state.mono_scratch.resize(max_blk, 0.0);
@@ -1438,6 +1522,7 @@ pub mod truce_integration {
             p.midi_base_channel = params.midi_ch.value() as u8;
             p.tune_hz = params.tune.read();
             p.input_gain_db = params.input_gain.read();
+            p.live_mode = params.live_mode.value();
             p.link = params.link.value();
 
             p.direct.enabled = params.direct_on.value();
@@ -1487,21 +1572,6 @@ pub mod truce_integration {
             p.harmonies[3].level_db = params.h4_level.read();
             p.harmonies[3].pan = params.h4_pan.read();
 
-            for event in events.iter() {
-                match &event.body {
-                    EventBody::NoteOn { channel, note, velocity, .. } => {
-                        state.core.handle_midi_event(0x90 | (*channel & 0x0F), *note, *velocity);
-                    }
-                    EventBody::NoteOff { channel, note, .. } => {
-                        state.core.handle_midi_event(0x80 | (*channel & 0x0F), *note, 0);
-                    }
-                    EventBody::ControlChange { channel, cc, value, .. } => {
-                        state.core.handle_midi_event(0xB0 | (*channel & 0x0F), *cc, *value);
-                    }
-                    _ => {}
-                }
-            }
-
             let n = buffer.num_samples();
             if state.mono_scratch.len() < n {
                 state.mono_scratch.resize(n, 0.0);
@@ -1517,11 +1587,37 @@ pub mod truce_integration {
             } else {
                 state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
             }
-            state.core.process_block(
-                &state.mono_scratch[..n],
-                &mut state.out_l_scratch[..n],
-                &mut state.out_r_scratch[..n],
-            );
+            let mut cur_sample = 0usize;
+            for event in events.iter() {
+                let ev_offset = (event.sample_offset as usize).min(n);
+                if ev_offset > cur_sample {
+                    state.core.process_block(
+                        &state.mono_scratch[cur_sample..ev_offset],
+                        &mut state.out_l_scratch[cur_sample..ev_offset],
+                        &mut state.out_r_scratch[cur_sample..ev_offset],
+                    );
+                    cur_sample = ev_offset;
+                }
+                match &event.body {
+                    EventBody::NoteOn { channel, note, velocity, .. } => {
+                        state.core.handle_midi_event(0x90 | (*channel & 0x0F), *note, *velocity);
+                    }
+                    EventBody::NoteOff { channel, note, .. } => {
+                        state.core.handle_midi_event(0x80 | (*channel & 0x0F), *note, 0);
+                    }
+                    EventBody::ControlChange { channel, cc, value, .. } => {
+                        state.core.handle_midi_event(0xB0 | (*channel & 0x0F), *cc, *value);
+                    }
+                    _ => {}
+                }
+            }
+            if cur_sample < n {
+                state.core.process_block(
+                    &state.mono_scratch[cur_sample..n],
+                    &mut state.out_l_scratch[cur_sample..n],
+                    &mut state.out_r_scratch[cur_sample..n],
+                );
+            }
 
             if buffer.num_output_channels() >= 2 {
                 buffer.output(0)[..n].copy_from_slice(&state.out_l_scratch[..n]);
@@ -1545,22 +1641,24 @@ pub mod truce_integration {
             ProcessStatus::Normal
         }
 
-        /// Interface vertical (1 voz por linha) com identificacao VOX 1..4 e linha separadora horizontal.
+        /// Interface vertical com largura de 11 colunas equalizada em todas as faixas,
+        /// garantindo que 'VOX 1..4 --------' encoste na margem esquerda antes do botao On.
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
                 section(
-                    "GLOBAL & INPUT",
+                    "GLOBAL & INPUT --------------------------------------------------------------------------------------------",
                     vec![
-                        dropdown(P::Key, "Key"),
-                        dropdown(P::MidiMode, "MIDI Mode"),
+                        dropdown(P::Key, "Key").cols(2),
+                        dropdown(P::MidiMode, "MIDI Mode").cols(2),
                         knob(P::MidiCh, "MIDI Ch"),
-                        knob(P::Tune, "Tune Hz"),
-                        knob(P::InputGain, "In Gain"),
+                        knob(P::Tune, "Tune Hz").cols(2),
+                        knob(P::InputGain, "In Gain").cols(2),
+                        toggle(P::LiveMode, "Live"),
                         meter(&[P::MeterIn], "In"),
                     ],
                 ),
                 section(
-                    "DIRECT & UNISON",
+                    "DIRECT & UNISON -------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::DirectOn, "Direct"),
                         knob(P::DirectLevel, "Dir Lev"),
@@ -1576,11 +1674,11 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 1 ____________________________________________________________________",
+                    "VOX 1 -----------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H1On, "On"),
                         toggle(P::H1Dual, "Dual"),
-                        knob(P::H1Scale, "Scale").cols(2),
+                        knob(P::H1Scale, "Scale").cols(4),
                         knob(P::H1Random, "Random"),
                         knob(P::H1Formant, "Formant"),
                         knob(P::H1Quantise, "Quantise"),
@@ -1589,11 +1687,11 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 2 ____________________________________________________________________",
+                    "VOX 2 -----------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H2On, "On"),
                         toggle(P::H2Dual, "Dual"),
-                        knob(P::H2Scale, "Scale").cols(2),
+                        knob(P::H2Scale, "Scale").cols(4),
                         knob(P::H2Random, "Random"),
                         knob(P::H2Formant, "Formant"),
                         knob(P::H2Quantise, "Quantise"),
@@ -1602,11 +1700,11 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 3 ____________________________________________________________________",
+                    "VOX 3 -----------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H3On, "On"),
                         toggle(P::H3Dual, "Dual"),
-                        knob(P::H3Scale, "Scale").cols(2),
+                        knob(P::H3Scale, "Scale").cols(4),
                         knob(P::H3Random, "Random"),
                         knob(P::H3Formant, "Formant"),
                         knob(P::H3Quantise, "Quantise"),
@@ -1615,11 +1713,11 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 4 ____________________________________________________________________",
+                    "VOX 4 -----------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H4On, "On"),
                         toggle(P::H4Dual, "Dual"),
-                        knob(P::H4Scale, "Scale").cols(2),
+                        knob(P::H4Scale, "Scale").cols(4),
                         knob(P::H4Random, "Random"),
                         knob(P::H4Formant, "Formant"),
                         knob(P::H4Quantise, "Quantise"),
@@ -1628,7 +1726,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.5")
+            .with_title("CHORUSVOX DECABUDDY v0.2.6")
             .into_editor(&params)
         }
     }
@@ -1636,5 +1734,55 @@ pub mod truce_integration {
     truce::plugin! {
         logic: ChorusVox,
         params: ChorusVoxParams,
+    }
+}
+
+#[cfg(test)]
+mod jazz_and_live_tests {
+    use super::*;
+
+    #[test]
+    fn test_live_vs_studio_latency_and_offline_bounce() {
+        let mut proc = DecaBuddyProcessor::new(44_100.0);
+        proc.params.live_mode = true;
+        proc.host_offline = false;
+        assert_eq!(proc.latency_samples(), 0, "Live mode deve reportar 0 amostras para zero-latency monitoring");
+
+        proc.host_offline = true;
+        assert!(proc.latency_samples() > 2000, "No Bounce offline, deve ativar o lookahead completo com PDC");
+    }
+
+    #[test]
+    fn test_jazz_dmaj7_to_fsharp_m6_with_sustain_pedal() {
+        let mut proc = DecaBuddyProcessor::new(44_100.0);
+        proc.params.midi_mode = MidiHarmonyMode::FlexiChord;
+        for h in &mut proc.params.harmonies {
+            h.scale = ScaleId::Midi;
+            h.enabled = true;
+        }
+
+        // Pressiona Pedal de Sustain (CC 64 = 127)
+        proc.handle_midi_event(0xB0, 64, 127);
+
+        // Toca acorde Dmaj7 arpejado (D4=62, F#4=66, A4=69, C#5=73) e solta as teclas fisicas
+        for &n in &[62u8, 66, 69, 73] {
+            proc.handle_midi_event(0x90, n, 100);
+            proc.handle_midi_event(0x80, n, 0);
+        }
+        assert_eq!(proc.chord_notes_len, 4, "Pedal de sustain deve reter as 4 notas do Dmaj7");
+
+        // Canta nota D4 (62): verifica que nenhuma voz gera b2/b9 clash (1 semitom = C#4 a -1 st)
+        for v in 0..4 {
+            let shift = proc.flexichord_jazz_shift(v, 62).expect("Deve gerar intervalo para Dmaj7");
+            assert!(shift.abs() >= 2, "Anti-clash deve impedir intervalo de 1 semitom: shift={}", shift);
+        }
+
+        // Toca novo acorde F#m6 segurando as teclas fisicas (F#4=66, A4=69, C#5=73, D#5=75)
+        for &n in &[66u8, 69, 73, 75] {
+            proc.handle_midi_event(0x90, n, 100);
+        }
+        // Levanta o pedal de sustain: D4 (62) que estava apenas no pedal sai, ficando F#m6 (4 notas)
+        proc.handle_midi_event(0xB0, 64, 0);
+        assert_eq!(proc.chord_notes_len, 4, "F#m6 fisicamente seguro permanece ativo com 4 notas");
     }
 }

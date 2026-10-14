@@ -3,7 +3,7 @@
 //! - Op-Amps JRC NJM4558L (IC12, IC13, IC14, IC402) com slew-rate limiting e rail de 9V DC.
 //! - DSP Analog Devices ADSP-2186MKST-300 (IC1): quantizacao 16-bit Q15 + dither TPDF e MAC 40-bit.
 //! - Codec Burr-Brown PCM3003E (IC3) + Filtros de reconstrucao e subsonico de 32.7848 Hz.
-//! - PSOLA Hibrido de Banda Dupla com rastreamento estendido ate 42 Hz para glissandos graves.
+//! - Modos Live (baixa latencia causal) vs Studio/Bounce (lookahead completo).
 
 use std::f32::consts::PI;
 
@@ -13,7 +13,6 @@ pub const DELAY_SIZE: usize = 16384;
 pub const DELAY_MASK: usize = DELAY_SIZE - 1;
 pub const HANN_LUT_SIZE: usize = 2048;
 
-// Constantes extraidas da secao .rdata da DecaBuddy.dll e do Manual de Servico HV10
 pub const AKAI_SUBSONIC_HP_HZ: f32 = 32.784804;
 pub const AKAI_DAC_LP_HZ: f32 = 12831.712823;
 pub const AKAI_DUAL_WARM_LP_HZ: f32 = 8500.0;
@@ -35,6 +34,16 @@ pub fn lookahead_samples_for_sr(sr: f32) -> usize {
 #[inline]
 pub fn out_delay_for_sr(sr: f32) -> usize {
     ((768.0 * (sr / 44_100.0)).round() as usize).clamp(512, 4096)
+}
+
+#[inline]
+pub fn live_lookahead_for_sr(sr: f32) -> usize {
+    ((256.0 * (sr / 44_100.0)).round() as usize).clamp(128, 1024)
+}
+
+#[inline]
+pub fn live_out_delay_for_sr(sr: f32) -> usize {
+    ((256.0 * (sr / 44_100.0)).round() as usize).clamp(128, 1024)
 }
 
 #[inline]
@@ -72,21 +81,15 @@ pub fn pan50_to_gains(pan_50: f32) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
-/// Simula o estagio de entrada discreto com transistores NPN 2SC3330 (TR1-TR3)
-/// e os diodos de protecao/clipping de silicio 1SS133T-77 (D1-D4, D101, D102).
 #[inline(always)]
 pub fn akai_input_stage_2sc3330(x: f32) -> f32 {
-    // 1. Assimetria exponencial de juncao BJT 2SC3330 (gera 2o harmonico sutil)
     let biased = x + 0.018 * x * x;
-    // 2. Joelho de conducao dos diodos de silicio 1SS133T-77 (~0.62V normalizado)
     let drive = biased * 1.06;
     let d2 = drive * drive;
     let diode_clipped = drive * (27.0 + d2) / (27.0 + 9.0 * d2);
     diode_clipped * 0.94
 }
 
-/// Estagio de amplificador operacional JRC NJM4558L (IC12, IC13, IC14, IC402)
-/// alimentado por barramento simples de 9V DC (headroom reduzido + slew-rate limiting).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Njm4558Stage {
     prev_out: f32,
@@ -101,21 +104,17 @@ impl Njm4558Stage {
 
     #[inline(always)]
     pub fn process(&mut self, x: f32, max_slew: f32, bw_alpha: f32) -> f32 {
-        // 1. Limitacao de slew-rate (1.0 V/us do NJM4558L suaviza transientes agressivos)
         let delta = (x - self.prev_out).clamp(-max_slew, max_slew);
         let slewed = self.prev_out + delta;
         self.prev_out = slewed + 1e-15 - 1e-15;
 
-        // 2. Polo dominante da largura de banda do op-amp
         let filtered = (1.0 - bw_alpha) * slewed + bw_alpha * self.lp_z1;
         self.lp_z1 = filtered + 1e-15 - 1e-15;
 
-        // 3. Compressao assimétrica de fonte simples de 9V DC (meia-tensao virtual Vcc/2)
         if filtered > 0.76 {
             let over = filtered - 0.76;
             0.76 + 0.24 * (over / (1.0 + over * 1.15))
         } else if filtered < -0.72 {
-            // Rail negativo próximo ao terra satura levemente mais cedo em fonte simples de 9V
             let under = -filtered - 0.72;
             -(0.72 + 0.26 * (under / (1.0 + under * 1.25)))
         } else {
@@ -477,6 +476,7 @@ impl PsolaSubVoice {
         dry_ring: &[f32],
         lp_ring: &[f32],
         hann_lut: &[f32],
+        write_pos: usize,
         read_pos: usize,
         emit_pos: usize,
         latest_mark: usize,
@@ -520,6 +520,7 @@ impl PsolaSubVoice {
                     dry_ring,
                     lp_ring,
                     hann_lut,
+                    write_pos,
                     latest_mark,
                     read_pos,
                     ta,
@@ -542,13 +543,11 @@ impl PsolaSubVoice {
         let dry = dry_ring[idx];
         let combined = wet * emit_mask + dry * (1.0 - emit_mask) * unvoiced_gain;
 
-        // 1. Filtro Passa-Altas Subsonico Akai (32.7848 Hz de .rdata)
         let hp_r = (-2.0 * PI * AKAI_SUBSONIC_HP_HZ / sr).exp();
         let hp_out = hp_r * (self.hp_y1 + combined - self.hp_x1);
         self.hp_x1 = combined;
         self.hp_y1 = hp_out + 1e-15 - 1e-15;
 
-        // 2. Filtro de Reconstrucao D/A Akai (12.83 kHz principal / 8.5 kHz Dual Warm)
         let lp_fc = if self.is_dual_warm { AKAI_DUAL_WARM_LP_HZ } else { AKAI_DAC_LP_HZ };
         let lp_a = (-2.0 * PI * lp_fc.min(sr * 0.45) / sr).exp();
         let dac_out = (1.0 - lp_a) * hp_out + lp_a * self.dac_lp_z1;
@@ -574,6 +573,7 @@ impl PsolaSubVoice {
         dry_ring: &[f32],
         lp_ring: &[f32],
         hann_lut: &[f32],
+        write_pos: usize,
         mark_center: usize,
         out_center: usize,
         ta: f32,
@@ -589,6 +589,14 @@ impl PsolaSubVoice {
         let body_step = ta / (half_out.max(1) as f32);
         let max_src_reach = ta * 0.98;
 
+        let min_dist_from_write = (ta.ceil() as usize) + 4;
+        let dist_to_write = write_pos.wrapping_sub(mark_center);
+        let safe_mark = if dist_to_write < min_dist_from_write {
+            write_pos.wrapping_sub(min_dist_from_write)
+        } else {
+            mark_center
+        };
+
         let lut_step = ((HANN_LUT_SIZE << 16) / l_out).max(1);
         let mut lut_phase = 0usize;
 
@@ -596,20 +604,18 @@ impl PsolaSubVoice {
             let offset_out = k as isize - half_out;
             let off_f = offset_out as f32;
 
-            // 1. Corpo Fundamental (lp_ring) com suporte completo 2*ts
             let src_body = off_f * body_step;
             let b_i0 = src_body.floor() as isize;
             let b_frac = src_body - (b_i0 as f32);
-            let bp0 = (mark_center as isize + b_i0) as usize & RING_MASK;
+            let bp0 = (safe_mark as isize + b_i0) as usize & RING_MASK;
             let bp1 = (bp0 + 1) & RING_MASK;
             let body_val = lp_ring[bp0] + b_frac * (lp_ring[bp1] - lp_ring[bp0]);
 
-            // 2. Detalhe de Formantes (dry_ring - lp_ring) confinado a [-ta, +ta]
             let src_fmt = off_f * fr;
             let fmt_val = if src_fmt.abs() < max_src_reach {
                 let f_i0 = src_fmt.floor() as isize;
                 let f_frac = src_fmt - (f_i0 as f32);
-                let fp0 = (mark_center as isize + f_i0) as usize & RING_MASK;
+                let fp0 = (safe_mark as isize + f_i0) as usize & RING_MASK;
                 let fp1 = (fp0 + 1) & RING_MASK;
                 let d0 = dry_ring[fp0] - lp_ring[fp0];
                 let d1 = dry_ring[fp1] - lp_ring[fp1];
@@ -625,13 +631,11 @@ impl PsolaSubVoice {
             let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
             lut_phase += lut_step;
 
-            // 3. Aritmetica 16-bit Fixed-Point (Q15) do ADSP-2186MKST-300 (IC1) + TPDF Dither
             let combined_grain = body_val + fmt_val;
             let dither = (self.rng_dither.next_bipolar() + self.rng_dither.next_bipolar()) * 0.25;
             let q15 = (combined_grain * 32_768.0 + dither).round() * (1.0 / 32_768.0);
 
             let dst = (out_center as isize + offset_out) as usize & RING_MASK;
-            // Acumulador MAC de 40 bits com headroom estendido
             self.out_ring[dst] = (self.out_ring[dst] + q15 * w).clamp(-3.99, 3.99);
             self.w_ring[dst] += w;
         }
@@ -697,6 +701,7 @@ mod tests {
                 &dry_ring,
                 &dry_ring,
                 &hann_lut,
+                write_pos,
                 read_pos,
                 emit_pos,
                 latest_mark,

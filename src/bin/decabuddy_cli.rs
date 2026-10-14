@@ -257,6 +257,7 @@ fn main() -> std::io::Result<()> {
     };
 
     let mut proc = DecaBuddyProcessor::new(sr as f32);
+    proc.host_offline = true;
     proc.params.key = 0;
     proc.params.harmonies[0].scale = ScaleId::LowOctave;
     proc.params.harmonies[1].scale = ScaleId::Unison;
@@ -287,7 +288,7 @@ fn main() -> std::io::Result<()> {
 
     write_wav_stereo_i16(out_path, &out_l, &out_r, sr)?;
     println!(
-        "[Scale Mode] Concluido ({:.2}s, latencia = {} amostras) -> {}",
+        "[Scale Mode] Concluido ({:.2}s, latencia Studio = {} amostras) -> {}",
         dur,
         proc.latency_samples(),
         out_path
