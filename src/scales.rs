@@ -5,84 +5,32 @@ pub const USER_NONE: i8 = i8::MIN;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ScaleId {
-    Midi = 0,
-    User = 1,
-    LowOctave = 2,
-    Low3rdModal1 = 3,
-    Low3rdModal2 = 4,
-    Low3rdModal3 = 5,
-    Low3rdModal4 = 6,
-    Low3rdModal5 = 7,
-    Low3rdHarmonicMinor = 8,
-    Low3rdMelodicMinor = 9,
-    Low5thModal1 = 10,
-    Low5thModal2 = 11,
-    Low5thModal3 = 12,
-    Low5thModal4 = 13,
-    Low5thModal5 = 14,
-    Low5thHarmonicMinor = 15,
-    Low5thMelodicMinor = 16,
-    Low7thMajor = 17,
-    Low7thMinor = 18,
-    Unison = 19,
-    High3rdModal1 = 20,
-    High3rdModal2 = 21,
-    High3rdModal3 = 22,
-    High3rdModal4 = 23,
-    High3rdModal5 = 24,
-    High3rdHarmonicMinor = 25,
-    High3rdMelodicMinor = 26,
-    High5thModal1 = 27,
-    High5thModal2 = 28,
-    High5thModal3 = 29,
-    High5thModal4 = 30,
-    High5thModal5 = 31,
-    High5thHarmonicMinor = 32,
-    High5thMelodicMinor = 33,
-    High7thMajor = 34,
-    High7thMinor = 35,
-    HighOctave = 36,
+    Midi = 0, User = 1, LowOctave = 2,
+    Low3rdModal1 = 3, Low3rdModal2 = 4, Low3rdModal3 = 5, Low3rdModal4 = 6, Low3rdModal5 = 7,
+    Low3rdHarmonicMinor = 8, Low3rdMelodicMinor = 9,
+    Low5thModal1 = 10, Low5thModal2 = 11, Low5thModal3 = 12, Low5thModal4 = 13, Low5thModal5 = 14,
+    Low5thHarmonicMinor = 15, Low5thMelodicMinor = 16,
+    Low7thMajor = 17, Low7thMinor = 18, Unison = 19,
+    High3rdModal1 = 20, High3rdModal2 = 21, High3rdModal3 = 22, High3rdModal4 = 23, High3rdModal5 = 24,
+    High3rdHarmonicMinor = 25, High3rdMelodicMinor = 26,
+    High5thModal1 = 27, High5thModal2 = 28, High5thModal3 = 29, High5thModal4 = 30, High5thModal5 = 31,
+    High5thHarmonicMinor = 32, High5thMelodicMinor = 33,
+    High7thMajor = 34, High7thMinor = 35, HighOctave = 36,
 }
 
 impl ScaleId {
     pub const ALL: [ScaleId; 37] = [
-        ScaleId::Midi,
-        ScaleId::User,
-        ScaleId::LowOctave,
-        ScaleId::Low3rdModal1,
-        ScaleId::Low3rdModal2,
-        ScaleId::Low3rdModal3,
-        ScaleId::Low3rdModal4,
-        ScaleId::Low3rdModal5,
-        ScaleId::Low3rdHarmonicMinor,
-        ScaleId::Low3rdMelodicMinor,
-        ScaleId::Low5thModal1,
-        ScaleId::Low5thModal2,
-        ScaleId::Low5thModal3,
-        ScaleId::Low5thModal4,
-        ScaleId::Low5thModal5,
-        ScaleId::Low5thHarmonicMinor,
-        ScaleId::Low5thMelodicMinor,
-        ScaleId::Low7thMajor,
-        ScaleId::Low7thMinor,
-        ScaleId::Unison,
-        ScaleId::High3rdModal1,
-        ScaleId::High3rdModal2,
-        ScaleId::High3rdModal3,
-        ScaleId::High3rdModal4,
-        ScaleId::High3rdModal5,
-        ScaleId::High3rdHarmonicMinor,
-        ScaleId::High3rdMelodicMinor,
-        ScaleId::High5thModal1,
-        ScaleId::High5thModal2,
-        ScaleId::High5thModal3,
-        ScaleId::High5thModal4,
-        ScaleId::High5thModal5,
-        ScaleId::High5thHarmonicMinor,
-        ScaleId::High5thMelodicMinor,
-        ScaleId::High7thMajor,
-        ScaleId::High7thMinor,
-        ScaleId::HighOctave,
+        ScaleId::Midi, ScaleId::User, ScaleId::LowOctave,
+        ScaleId::Low3rdModal1, ScaleId::Low3rdModal2, ScaleId::Low3rdModal3, ScaleId::Low3rdModal4, ScaleId::Low3rdModal5,
+        ScaleId::Low3rdHarmonicMinor, ScaleId::Low3rdMelodicMinor,
+        ScaleId::Low5thModal1, ScaleId::Low5thModal2, ScaleId::Low5thModal3, ScaleId::Low5thModal4, ScaleId::Low5thModal5,
+        ScaleId::Low5thHarmonicMinor, ScaleId::Low5thMelodicMinor,
+        ScaleId::Low7thMajor, ScaleId::Low7thMinor, ScaleId::Unison,
+        ScaleId::High3rdModal1, ScaleId::High3rdModal2, ScaleId::High3rdModal3, ScaleId::High3rdModal4, ScaleId::High3rdModal5,
+        ScaleId::High3rdHarmonicMinor, ScaleId::High3rdMelodicMinor,
+        ScaleId::High5thModal1, ScaleId::High5thModal2, ScaleId::High5thModal3, ScaleId::High5thModal4, ScaleId::High5thModal5,
+        ScaleId::High5thHarmonicMinor, ScaleId::High5thMelodicMinor,
+        ScaleId::High7thMajor, ScaleId::High7thMinor, ScaleId::HighOctave,
     ];
 
     pub fn from_index(idx: usize) -> Self {
@@ -96,16 +44,9 @@ impl ScaleId {
     pub fn root_pc(self) -> usize {
         use ScaleId::*;
         match self {
-            Low3rdHarmonicMinor
-            | Low3rdMelodicMinor
-            | Low5thHarmonicMinor
-            | Low5thMelodicMinor
-            | Low7thMinor
-            | High3rdHarmonicMinor
-            | High3rdMelodicMinor
-            | High5thHarmonicMinor
-            | High5thMelodicMinor
-            | High7thMinor => 9,
+            Low3rdHarmonicMinor | Low3rdMelodicMinor | Low5thHarmonicMinor | Low5thMelodicMinor
+            | Low7thMinor | High3rdHarmonicMinor | High3rdMelodicMinor | High5thHarmonicMinor
+            | High5thMelodicMinor | High7thMinor => 9,
             _ => 0,
         }
     }
@@ -124,14 +65,10 @@ pub const AKAI_SCALE_NAMES: [&str; 37] = [
 ];
 
 const N: Option<i8> = None;
-const fn s(v: i8) -> Option<i8> {
-    Some(v)
-}
+const fn s(v: i8) -> Option<i8> { Some(v) }
 
 pub const PRESET_TABLES: [ScaleTable; 37] = [
-    [N; 12],
-    [N; 12],
-    [s(-12); 12],
+    [N; 12], [N; 12], [s(-12); 12],
     [s(-8), N, s(-7), N, s(-9), s(-8), N, s(-7), N, s(-9), N, s(-9)],
     [s(-7), N, s(-7), N, s(-9), s(-8), N, s(-7), N, s(-9), N, s(-9)],
     [s(-8), N, s(-7), N, s(-9), s(-8), N, s(-8), N, s(-9), N, s(-9)],
@@ -176,10 +113,7 @@ pub struct ScaleBank {
 
 impl Default for ScaleBank {
     fn default() -> Self {
-        Self {
-            preset_tables: PRESET_TABLES,
-            user_tables: [[Some(0); 12]; 4],
-        }
+        Self { preset_tables: PRESET_TABLES, user_tables: [[Some(0); 12]; 4] }
     }
 }
 
@@ -196,38 +130,22 @@ impl ScaleBank {
     pub fn lookup_offset(&self, id: ScaleId, voice_idx: usize, pitch_class: usize) -> Option<i8> {
         let table = self.get_table(id, voice_idx);
         let pc = pitch_class % 12;
-        if let Some(off) = table[pc] {
-            return Some(off);
-        }
+        if let Some(off) = table[pc] { return Some(off); }
         for d in 1..=6 {
-            let down = (pc + 12 - d) % 12;
-            if let Some(off) = table[down] {
-                return Some(off);
-            }
-            let up = (pc + d) % 12;
-            if let Some(off) = table[up] {
-                return Some(off);
-            }
+            if let Some(off) = table[(pc + 12 - d) % 12] { return Some(off); }
+            if let Some(off) = table[(pc + d) % 12] { return Some(off); }
         }
         None
     }
 
     pub fn set_user_step_raw(&mut self, user_idx: usize, step: usize, raw_val: i8) {
         if user_idx < 4 && step < 12 {
-            self.user_tables[user_idx][step] = if raw_val == USER_NONE {
-                None
-            } else {
-                Some(raw_val.clamp(-48, 48))
-            };
+            self.user_tables[user_idx][step] = if raw_val == USER_NONE { None } else { Some(raw_val.clamp(-48, 48)) };
         }
     }
 
     pub fn get_user_step_raw(&self, user_idx: usize, step: usize) -> i8 {
-        if user_idx < 4 && step < 12 {
-            self.user_tables[user_idx][step].unwrap_or(USER_NONE)
-        } else {
-            USER_NONE
-        }
+        if user_idx < 4 && step < 12 { self.user_tables[user_idx][step].unwrap_or(USER_NONE) } else { USER_NONE }
     }
 }
 
@@ -244,17 +162,12 @@ mod tests {
         for i in 3..=18 {
             let low = bank.preset_tables[i];
             let high = bank.preset_tables[i + 17];
-            for pc in 0..12 {
-                assert_eq!(low[pc].map(|v| v + 12), high[pc]);
-            }
+            for pc in 0..12 { assert_eq!(low[pc].map(|v| v + 12), high[pc]); }
         }
     }
 
     #[test]
     fn ten_tables_are_rooted_on_the_relative_minor() {
-        assert_eq!(
-            ScaleId::ALL.iter().filter(|s| s.root_pc() == 9).count(),
-            10
-        );
+        assert_eq!(ScaleId::ALL.iter().filter(|s| s.root_pc() == 9).count(), 10);
     }
 }

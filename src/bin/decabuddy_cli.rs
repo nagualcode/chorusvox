@@ -12,13 +12,7 @@ use std::time::Instant;
 const SR: u32 = 44_100;
 
 #[derive(Clone, Copy, Default)]
-struct FormantResonator {
-    b0: f32,
-    a1: f32,
-    a2: f32,
-    z1: f32,
-    z2: f32,
-}
+struct FormantResonator { b0: f32, a1: f32, a2: f32, z1: f32, z2: f32 }
 
 impl FormantResonator {
     fn set(&mut self, freq_hz: f32, bw_hz: f32, sr: f32) {
@@ -40,28 +34,18 @@ impl FormantResonator {
 
 fn vowel_formants(v: char) -> [f32; 3] {
     match v {
-        'a' => [800.0, 1250.0, 2800.0],
-        'e' => [500.0, 1900.0, 2600.0],
-        'i' => [320.0, 2300.0, 3000.0],
-        'o' => [500.0, 900.0, 2700.0],
-        'u' => [350.0, 800.0, 2600.0],
-        _ => [600.0, 1500.0, 2700.0],
+        'a' => [800.0, 1250.0, 2800.0], 'e' => [500.0, 1900.0, 2600.0],
+        'i' => [320.0, 2300.0, 3000.0], 'o' => [500.0, 900.0, 2700.0],
+        'u' => [350.0, 800.0, 2600.0], _ => [600.0, 1500.0, 2700.0],
     }
 }
 
 fn synth_formant_voice(sr: f32) -> Vec<f32> {
     let phrase: &[(char, char, f32, f32)] = &[
-        ('s', 'a', 60.0, 0.55),
-        ('t', 'e', 64.0, 0.50),
-        (' ', 'o', 67.0, 0.55),
-        ('s', 'i', 65.0, 0.45),
-        ('t', 'e', 64.0, 0.45),
-        (' ', 'a', 62.0, 0.50),
-        ('t', 'o', 60.0, 0.80),
-        ('s', 'u', 55.0, 0.85),
-        (' ', 'a', 57.0, 0.50),
-        ('t', 'i', 59.0, 0.50),
-        (' ', 'o', 60.0, 1.10),
+        ('s', 'a', 60.0, 0.55), ('t', 'e', 64.0, 0.50), (' ', 'o', 67.0, 0.55),
+        ('s', 'i', 65.0, 0.45), ('t', 'e', 64.0, 0.45), (' ', 'a', 62.0, 0.50),
+        ('t', 'o', 60.0, 0.80), ('s', 'u', 55.0, 0.85), (' ', 'a', 57.0, 0.50),
+        ('t', 'i', 59.0, 0.50), (' ', 'o', 60.0, 1.10),
     ];
 
     let bws = [90.0_f32, 110.0, 160.0];
@@ -73,11 +57,7 @@ fn synth_formant_voice(sr: f32) -> Vec<f32> {
     let mut hp_prev_y = 0.0_f32;
 
     for &(cons, vow, midi, dur) in phrase {
-        let n_cons = match cons {
-            's' => (0.08 * sr) as usize,
-            't' => (0.03 * sr) as usize,
-            _ => 0,
-        };
+        let n_cons = match cons { 's' => (0.08 * sr) as usize, 't' => (0.03 * sr) as usize, _ => 0 };
         for i in 0..n_cons {
             let noise = rng.next_bipolar();
             let hp = noise - hp_prev_x + 0.85 * hp_prev_y;
@@ -94,9 +74,7 @@ fn synth_formant_voice(sr: f32) -> Vec<f32> {
         let n_vow = (dur * sr) as usize;
         let freqs = vowel_formants(vow);
         let mut res = [FormantResonator::default(); 3];
-        for k in 0..3 {
-            res[k].set(freqs[k], bws[k], sr);
-        }
+        for k in 0..3 { res[k].set(freqs[k], bws[k], sr); }
         let detune = rng.next_bipolar() * 0.12;
         let vib_phase_off = (rng.next_bipolar() + 1.0) * PI;
 
@@ -114,10 +92,7 @@ fn synth_formant_voice(sr: f32) -> Vec<f32> {
 
             glottal_lp = pulse + 0.93 * glottal_lp;
             let mut sig = glottal_lp + 0.015 * rng.next_bipolar();
-
-            for r in &mut res {
-                sig = r.process(sig);
-            }
+            for r in &mut res { sig = r.process(sig); }
 
             let attack = (t / 0.03).min(1.0);
             let release = ((dur - t) / 0.06).min(1.0).max(0.0);
@@ -128,9 +103,7 @@ fn synth_formant_voice(sr: f32) -> Vec<f32> {
     let peak = out.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
     if peak > 1e-6 {
         let scale = 0.8 / peak;
-        for x in &mut out {
-            *x *= scale;
-        }
+        for x in &mut out { *x *= scale; }
     }
     out
 }
@@ -166,10 +139,7 @@ fn read_wav_mono(path: &str) -> std::io::Result<(Vec<f32>, u32)> {
     let mut buf = Vec::new();
     BufReader::new(File::open(path)?).read_to_end(&mut buf)?;
     if buf.len() < 44 || &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Cabecalho RIFF/WAVE invalido",
-        ));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Cabecalho WAV invalido"));
     }
 
     let mut audio_format = 1u16;
@@ -180,20 +150,14 @@ fn read_wav_mono(path: &str) -> std::io::Result<(Vec<f32>, u32)> {
 
     while pos + 8 <= buf.len() {
         let tag = &buf[pos..pos + 4];
-        let sz =
-            u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]) as usize;
+        let sz = u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]) as usize;
         let chunk_start = pos + 8;
         let chunk_end = (chunk_start + sz).min(buf.len());
 
         if tag == b"fmt " && sz >= 16 {
             audio_format = u16::from_le_bytes([buf[chunk_start], buf[chunk_start + 1]]);
             channels = u16::from_le_bytes([buf[chunk_start + 2], buf[chunk_start + 3]]) as usize;
-            sr = u32::from_le_bytes([
-                buf[chunk_start + 4],
-                buf[chunk_start + 5],
-                buf[chunk_start + 6],
-                buf[chunk_start + 7],
-            ]);
+            sr = u32::from_le_bytes([buf[chunk_start + 4], buf[chunk_start + 5], buf[chunk_start + 6], buf[chunk_start + 7]]);
             bits_per_sample = u16::from_le_bytes([buf[chunk_start + 14], buf[chunk_start + 15]]);
         } else if tag == b"data" {
             let raw = &buf[chunk_start..chunk_end];
@@ -205,25 +169,12 @@ fn read_wav_mono(path: &str) -> std::io::Result<(Vec<f32>, u32)> {
                 let s = match (audio_format, bits_per_sample) {
                     (1, 16) => i16::from_le_bytes([frame[0], frame[1]]) as f32 / 32768.0,
                     (1, 24) => {
-                        let v = ((frame[2] as i8 as i32) << 16)
-                            | ((frame[1] as i32) << 8)
-                            | (frame[0] as i32);
+                        let v = ((frame[2] as i8 as i32) << 16) | ((frame[1] as i32) << 8) | (frame[0] as i32);
                         v as f32 / 8_388_608.0
                     }
-                    (1, 32) => {
-                        i32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as f32
-                            / 2_147_483_648.0
-                    }
+                    (1, 32) => i32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as f32 / 2_147_483_648.0,
                     (3, 32) => f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]),
-                    _ => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            format!(
-                                "Formato WAV nao suportado: format={}, bits={}",
-                                audio_format, bits_per_sample
-                            ),
-                        ))
-                    }
+                    _ => return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Formato WAV nao suportado")),
                 };
                 out.push(s);
             }
@@ -231,30 +182,20 @@ fn read_wav_mono(path: &str) -> std::io::Result<(Vec<f32>, u32)> {
         }
         pos = chunk_start + ((sz + 1) & !1);
     }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "Chunk data nao encontrado no WAV",
-    ))
+    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Chunk data ausente"))
 }
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
     let (input, sr) = if args.len() >= 2 {
-        println!("Lendo arquivo de entrada: {}", args[1]);
         read_wav_mono(&args[1])?
     } else {
-        println!("Gerando voz cantada sintetica com formantes e consoantes (44.1 kHz)...");
         let dry = synth_formant_voice(SR as f32);
         write_wav_stereo_i16("00_dry_voice.wav", &dry, &dry, SR)?;
         (dry, SR)
     };
 
-    let out_path = if args.len() >= 3 {
-        args[2].as_str()
-    } else {
-        "decabuddy_rust_output.wav"
-    };
+    let out_path = if args.len() >= 3 { args[2].as_str() } else { "decabuddy_rust_output.wav" };
 
     let mut proc = DecaBuddyProcessor::new(sr as f32);
     proc.host_offline = true;
@@ -269,11 +210,7 @@ fn main() -> std::io::Result<()> {
     let mut out_r = vec![0.0_f32; input.len()];
 
     let t0 = Instant::now();
-    for ((in_blk, l_blk), r_blk) in input
-        .chunks(128)
-        .zip(out_l.chunks_mut(128))
-        .zip(out_r.chunks_mut(128))
-    {
+    for ((in_blk, l_blk), r_blk) in input.chunks(128).zip(out_l.chunks_mut(128)).zip(out_r.chunks_mut(128)) {
         proc.process_block(in_blk, l_blk, r_blk);
     }
     let el = t0.elapsed().as_secs_f32();
@@ -281,17 +218,8 @@ fn main() -> std::io::Result<()> {
 
     println!(
         "Benchmark CPU: {:.1} ms para {:.2}s de audio = {:.0}x tempo real",
-        el * 1000.0,
-        dur,
-        dur / el.max(1e-6)
+        el * 1000.0, dur, dur / el.max(1e-6)
     );
-
     write_wav_stereo_i16(out_path, &out_l, &out_r, sr)?;
-    println!(
-        "[Scale Mode] Concluido ({:.2}s, latencia Studio = {} amostras) -> {}",
-        dur,
-        proc.latency_samples(),
-        out_path
-    );
     Ok(())
 }

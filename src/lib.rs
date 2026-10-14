@@ -6,9 +6,9 @@ pub mod scales;
 use dsp::{
     gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr, lookahead_samples_for_sr,
     max_grain_for_sr, out_delay_for_sr, pan50_to_gains, soft_saturate, voice_db_to_lin,
-    AkaiInputImpedanceFilter, BiquadLowpass, HarmonyChannelDsp, OversampledAnalogStage,
-    PitchTracker, PsolaSubVoice, ScopedFtzDaz, SibilanceDetector, PCM3003_RECON_LP_HZ,
-    RING_MASK, RING_SIZE,
+    AsyncYinWorker, BiquadLowpass, HarmonyChannelDsp, InputTransformerStage, LpcFormantMorpher,
+    Njm4558StereoCrosstalk, OversampledAnalogStage, PitchTracker, PowerSupply9VSag,
+    PsolaSubVoice, ScopedFtzDaz, SibilanceDetector, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -24,278 +24,131 @@ pub struct VstParamSpec {
 
 pub const NUM_VST_PARAMS: usize = 95;
 
+const fn sp(index: usize, id: &'static str, unit: &'static str, min: f32, max: f32, default: f32) -> VstParamSpec {
+    VstParamSpec { index, id, unit, min, max, default }
+}
+
 pub const VST_PARAM_SPECS: [VstParamSpec; NUM_VST_PARAMS] = [
-    VstParamSpec { index: 0, id: "preset", unit: "", min: -1.0, max: 3.0, default: -1.0 },
-    VstParamSpec { index: 1, id: "key", unit: "", min: 0.0, max: 11.0, default: 0.0 },
-    VstParamSpec { index: 2, id: "midi ch", unit: "", min: 1.0, max: 16.0, default: 1.0 },
-    VstParamSpec { index: 3, id: "tune", unit: "Hz", min: 427.0, max: 453.0, default: 440.0 },
-    VstParamSpec { index: 4, id: "input gain", unit: "dB", min: -15.0, max: 15.0, default: 0.0 },
-    VstParamSpec { index: 5, id: "Preset hotkey", unit: "", min: 0.0, max: 3.0, default: 0.0 },
-    VstParamSpec { index: 6, id: "direct", unit: "", min: 0.0, max: 1.0, default: 1.0 },
-    VstParamSpec { index: 7, id: "direct level", unit: "dB", min: -24.0, max: 0.0, default: 0.0 },
-    VstParamSpec { index: 8, id: "direct pan", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 9, id: "dual", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 10, id: "dual random", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 11, id: "dual formant", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 12, id: "dual quantise", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 13, id: "dual level", unit: "dB", min: -24.0, max: 0.0, default: 0.0 },
-    VstParamSpec { index: 14, id: "dual pan", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 15, id: "h1", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 16, id: "h1 dual", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 17, id: "h1 scale", unit: "", min: 0.0, max: 36.0, default: 19.0 },
-    VstParamSpec { index: 18, id: "h1 random", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 19, id: "h1 formant", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 20, id: "h1 quantise", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 21, id: "h1 level", unit: "dB", min: -24.0, max: 0.0, default: 0.0 },
-    VstParamSpec { index: 22, id: "h1 pan", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 23, id: "h2", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 24, id: "h2 dual", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 25, id: "h2 scale", unit: "", min: 0.0, max: 36.0, default: 19.0 },
-    VstParamSpec { index: 26, id: "h2 random", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 27, id: "h2 formant", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 28, id: "h2 quantise", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 29, id: "h2 level", unit: "dB", min: -24.0, max: 0.0, default: 0.0 },
-    VstParamSpec { index: 30, id: "h2 pan", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 31, id: "h3", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 32, id: "h3 dual", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 33, id: "h3 scale", unit: "", min: 0.0, max: 36.0, default: 19.0 },
-    VstParamSpec { index: 34, id: "h3 random", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 35, id: "h3 formant", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 36, id: "h3 quantise", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 37, id: "h3 level", unit: "dB", min: -24.0, max: 0.0, default: 0.0 },
-    VstParamSpec { index: 38, id: "h3 pan", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 39, id: "h4", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 40, id: "h4 dual", unit: "", min: 0.0, max: 1.0, default: 0.0 },
-    VstParamSpec { index: 41, id: "h4 scale", unit: "", min: 0.0, max: 36.0, default: 19.0 },
-    VstParamSpec { index: 42, id: "h4 random", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 43, id: "h4 formant", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 44, id: "h4 quantise", unit: "", min: 0.0, max: 100.0, default: 0.0 },
-    VstParamSpec { index: 45, id: "h4 level", unit: "dB", min: -24.0, max: 0.0, default: 0.0 },
-    VstParamSpec { index: 46, id: "h4 pan", unit: "", min: -50.0, max: 50.0, default: 0.0 },
-    VstParamSpec { index: 47, id: "user1/0", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 48, id: "user1/1", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 49, id: "user1/2", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 50, id: "user1/3", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 51, id: "user1/4", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 52, id: "user1/5", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 53, id: "user1/6", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 54, id: "user1/7", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 55, id: "user1/8", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 56, id: "user1/9", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 57, id: "user1/10", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 58, id: "user1/11", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 59, id: "user2/0", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 60, id: "user2/1", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 61, id: "user2/2", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 62, id: "user2/3", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 63, id: "user2/4", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 64, id: "user2/5", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 65, id: "user2/6", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 66, id: "user2/7", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 67, id: "user2/8", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 68, id: "user2/9", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 69, id: "user2/10", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 70, id: "user2/11", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 71, id: "user3/0", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 72, id: "user3/1", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 73, id: "user3/2", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 74, id: "user3/3", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 75, id: "user3/4", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 76, id: "user3/5", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 77, id: "user3/6", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 78, id: "user3/7", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 79, id: "user3/8", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 80, id: "user3/9", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 81, id: "user3/10", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 82, id: "user3/11", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 83, id: "user4/0", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 84, id: "user4/1", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 85, id: "user4/2", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 86, id: "user4/3", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 87, id: "user4/4", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 88, id: "user4/5", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 89, id: "user4/6", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 90, id: "user4/7", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 91, id: "user4/8", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 92, id: "user4/9", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 93, id: "user4/10", unit: "", min: -128.0, max: 127.0, default: 0.0 },
-    VstParamSpec { index: 94, id: "user4/11", unit: "", min: -128.0, max: 127.0, default: 0.0 },
+    sp(0, "preset", "", -1.0, 3.0, -1.0), sp(1, "key", "", 0.0, 11.0, 0.0),
+    sp(2, "midi ch", "", 1.0, 16.0, 1.0), sp(3, "tune", "Hz", 427.0, 453.0, 440.0),
+    sp(4, "input gain", "dB", -15.0, 15.0, 0.0), sp(5, "Preset hotkey", "", 0.0, 3.0, 0.0),
+    sp(6, "direct", "", 0.0, 1.0, 1.0), sp(7, "direct level", "dB", -24.0, 0.0, 0.0),
+    sp(8, "direct pan", "", -50.0, 50.0, 0.0), sp(9, "dual", "", 0.0, 1.0, 0.0),
+    sp(10, "dual random", "", 0.0, 100.0, 0.0), sp(11, "dual formant", "", -50.0, 50.0, 0.0),
+    sp(12, "dual quantise", "", 0.0, 100.0, 0.0), sp(13, "dual level", "dB", -24.0, 0.0, 0.0),
+    sp(14, "dual pan", "", -50.0, 50.0, 0.0),
+    sp(15, "h1", "", 0.0, 1.0, 0.0), sp(16, "h1 dual", "", 0.0, 1.0, 0.0),
+    sp(17, "h1 scale", "", 0.0, 36.0, 19.0), sp(18, "h1 random", "", 0.0, 100.0, 0.0),
+    sp(19, "h1 formant", "", -50.0, 50.0, 0.0), sp(20, "h1 quantise", "", 0.0, 100.0, 0.0),
+    sp(21, "h1 level", "dB", -24.0, 0.0, 0.0), sp(22, "h1 pan", "", -50.0, 50.0, 0.0),
+    sp(23, "h2", "", 0.0, 1.0, 0.0), sp(24, "h2 dual", "", 0.0, 1.0, 0.0),
+    sp(25, "h2 scale", "", 0.0, 36.0, 19.0), sp(26, "h2 random", "", 0.0, 100.0, 0.0),
+    sp(27, "h2 formant", "", -50.0, 50.0, 0.0), sp(28, "h2 quantise", "", 0.0, 100.0, 0.0),
+    sp(29, "h2 level", "dB", -24.0, 0.0, 0.0), sp(30, "h2 pan", "", -50.0, 50.0, 0.0),
+    sp(31, "h3", "", 0.0, 1.0, 0.0), sp(32, "h3 dual", "", 0.0, 1.0, 0.0),
+    sp(33, "h3 scale", "", 0.0, 36.0, 19.0), sp(34, "h3 random", "", 0.0, 100.0, 0.0),
+    sp(35, "h3 formant", "", -50.0, 50.0, 0.0), sp(36, "h3 quantise", "", 0.0, 100.0, 0.0),
+    sp(37, "h3 level", "dB", -24.0, 0.0, 0.0), sp(38, "h3 pan", "", -50.0, 50.0, 0.0),
+    sp(39, "h4", "", 0.0, 1.0, 0.0), sp(40, "h4 dual", "", 0.0, 1.0, 0.0),
+    sp(41, "h4 scale", "", 0.0, 36.0, 19.0), sp(42, "h4 random", "", 0.0, 100.0, 0.0),
+    sp(43, "h4 formant", "", -50.0, 50.0, 0.0), sp(44, "h4 quantise", "", 0.0, 100.0, 0.0),
+    sp(45, "h4 level", "dB", -24.0, 0.0, 0.0), sp(46, "h4 pan", "", -50.0, 50.0, 0.0),
+    sp(47, "user1/0", "", -128.0, 127.0, 0.0), sp(48, "user1/1", "", -128.0, 127.0, 0.0),
+    sp(49, "user1/2", "", -128.0, 127.0, 0.0), sp(50, "user1/3", "", -128.0, 127.0, 0.0),
+    sp(51, "user1/4", "", -128.0, 127.0, 0.0), sp(52, "user1/5", "", -128.0, 127.0, 0.0),
+    sp(53, "user1/6", "", -128.0, 127.0, 0.0), sp(54, "user1/7", "", -128.0, 127.0, 0.0),
+    sp(55, "user1/8", "", -128.0, 127.0, 0.0), sp(56, "user1/9", "", -128.0, 127.0, 0.0),
+    sp(57, "user1/10", "", -128.0, 127.0, 0.0), sp(58, "user1/11", "", -128.0, 127.0, 0.0),
+    sp(59, "user2/0", "", -128.0, 127.0, 0.0), sp(60, "user2/1", "", -128.0, 127.0, 0.0),
+    sp(61, "user2/2", "", -128.0, 127.0, 0.0), sp(62, "user2/3", "", -128.0, 127.0, 0.0),
+    sp(63, "user2/4", "", -128.0, 127.0, 0.0), sp(64, "user2/5", "", -128.0, 127.0, 0.0),
+    sp(65, "user2/6", "", -128.0, 127.0, 0.0), sp(66, "user2/7", "", -128.0, 127.0, 0.0),
+    sp(67, "user2/8", "", -128.0, 127.0, 0.0), sp(68, "user2/9", "", -128.0, 127.0, 0.0),
+    sp(69, "user2/10", "", -128.0, 127.0, 0.0), sp(70, "user2/11", "", -128.0, 127.0, 0.0),
+    sp(71, "user3/0", "", -128.0, 127.0, 0.0), sp(72, "user3/1", "", -128.0, 127.0, 0.0),
+    sp(73, "user3/2", "", -128.0, 127.0, 0.0), sp(74, "user3/3", "", -128.0, 127.0, 0.0),
+    sp(75, "user3/4", "", -128.0, 127.0, 0.0), sp(76, "user3/5", "", -128.0, 127.0, 0.0),
+    sp(77, "user3/6", "", -128.0, 127.0, 0.0), sp(78, "user3/7", "", -128.0, 127.0, 0.0),
+    sp(79, "user3/8", "", -128.0, 127.0, 0.0), sp(80, "user3/9", "", -128.0, 127.0, 0.0),
+    sp(81, "user3/10", "", -128.0, 127.0, 0.0), sp(82, "user3/11", "", -128.0, 127.0, 0.0),
+    sp(83, "user4/0", "", -128.0, 127.0, 0.0), sp(84, "user4/1", "", -128.0, 127.0, 0.0),
+    sp(85, "user4/2", "", -128.0, 127.0, 0.0), sp(86, "user4/3", "", -128.0, 127.0, 0.0),
+    sp(87, "user4/4", "", -128.0, 127.0, 0.0), sp(88, "user4/5", "", -128.0, 127.0, 0.0),
+    sp(89, "user4/6", "", -128.0, 127.0, 0.0), sp(90, "user4/7", "", -128.0, 127.0, 0.0),
+    sp(91, "user4/8", "", -128.0, 127.0, 0.0), sp(92, "user4/9", "", -128.0, 127.0, 0.0),
+    sp(93, "user4/10", "", -128.0, 127.0, 0.0), sp(94, "user4/11", "", -128.0, 127.0, 0.0),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MidiHarmonyMode {
-    AutoChordOrMultiCh,
-    MonoChannels,
-    WaitAll,
-    Priority,
-    FlexiChord,
+    AutoChordOrMultiCh, MonoChannels, WaitAll, Priority, FlexiChord,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct DirectParams {
-    pub enabled: bool,
-    pub level_db: f32,
-    pub pan: f32,
-}
+pub struct DirectParams { pub enabled: bool, pub level_db: f32, pub pan: f32 }
 
 impl Default for DirectParams {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            level_db: 0.0,
-            pan: 0.0,
-        }
-    }
+    fn default() -> Self { Self { enabled: true, level_db: 0.0, pan: 0.0 } }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct UnisonParams {
-    pub enabled: bool,
-    pub random: f32,
-    pub formant: f32,
-    pub quantise: f32,
-    pub level_db: f32,
-    pub pan: f32,
+    pub enabled: bool, pub random: f32, pub formant: f32, pub quantise: f32, pub level_db: f32, pub pan: f32,
 }
 
 impl Default for UnisonParams {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            random: 0.0,
-            formant: 0.0,
-            quantise: 0.0,
-            level_db: 0.0,
-            pan: 0.0,
-        }
+        Self { enabled: false, random: 0.0, formant: 0.0, quantise: 0.0, level_db: 0.0, pan: 0.0 }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonyVoiceParams {
-    pub enabled: bool,
-    pub dual: bool,
-    pub scale: ScaleId,
-    pub random: f32,
-    pub formant: f32,
-    pub quantise: f32,
-    pub level_db: f32,
-    pub pan: f32,
+    pub enabled: bool, pub dual: bool, pub scale: ScaleId,
+    pub random: f32, pub formant: f32, pub quantise: f32, pub level_db: f32, pub pan: f32,
 }
 
 impl Default for HarmonyVoiceParams {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            dual: false,
-            scale: ScaleId::Unison,
-            random: 25.0,
-            formant: 0.0,
-            quantise: 30.0,
-            level_db: -6.0,
-            pan: 0.0,
-        }
+        Self { enabled: true, dual: false, scale: ScaleId::Unison, random: 25.0, formant: 0.0, quantise: 30.0, level_db: -6.0, pan: 0.0 }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct DecaBuddyParams {
-    pub bypass: bool,
-    pub live_mode: bool,
-    pub link: bool,
-    pub preset: i8,
-    pub key: u8,
-    pub midi_base_channel: u8,
-    pub midi_mode: MidiHarmonyMode,
-    pub tune_hz: f32,
-    pub input_gain_db: f32,
-    pub preset_hotkey: u8,
-    pub master_level_db: f32,
-    pub direct: DirectParams,
-    pub unison: UnisonParams,
-    pub harmonies: [HarmonyVoiceParams; 4],
+    pub bypass: bool, pub live_mode: bool, pub link: bool, pub preset: i8, pub key: u8,
+    pub midi_base_channel: u8, pub midi_mode: MidiHarmonyMode, pub tune_hz: f32,
+    pub input_gain_db: f32, pub preset_hotkey: u8, pub master_level_db: f32,
+    pub direct: DirectParams, pub unison: UnisonParams, pub harmonies: [HarmonyVoiceParams; 4],
 }
 
 impl Default for DecaBuddyParams {
     fn default() -> Self {
         Self {
-            bypass: false,
-            live_mode: true,
-            link: false,
-            preset: -1,
-            key: 0,
-            midi_base_channel: 1,
-            midi_mode: MidiHarmonyMode::AutoChordOrMultiCh,
-            tune_hz: 440.0,
-            input_gain_db: 0.0,
-            preset_hotkey: 0,
-            master_level_db: 0.0,
-            direct: DirectParams::default(),
-            unison: UnisonParams::default(),
+            bypass: false, live_mode: true, link: false, preset: -1, key: 0,
+            midi_base_channel: 1, midi_mode: MidiHarmonyMode::AutoChordOrMultiCh,
+            tune_hz: 440.0, input_gain_db: 0.0, preset_hotkey: 0, master_level_db: 0.0,
+            direct: DirectParams::default(), unison: UnisonParams::default(),
             harmonies: [
-                HarmonyVoiceParams {
-                    enabled: true,
-                    dual: false,
-                    scale: ScaleId::LowOctave,
-                    random: 25.0,
-                    formant: -15.0,
-                    quantise: 35.0,
-                    level_db: -6.0,
-                    pan: -30.0,
-                },
-                HarmonyVoiceParams {
-                    enabled: false,
-                    dual: false,
-                    scale: ScaleId::Unison,
-                    random: 20.0,
-                    formant: 0.0,
-                    quantise: 25.0,
-                    level_db: -8.0,
-                    pan: 10.0,
-                },
-                HarmonyVoiceParams {
-                    enabled: true,
-                    dual: true,
-                    scale: ScaleId::High3rdModal1,
-                    random: 35.0,
-                    formant: 10.0,
-                    quantise: 35.0,
-                    level_db: -7.0,
-                    pan: 25.0,
-                },
-                HarmonyVoiceParams {
-                    enabled: true,
-                    dual: true,
-                    scale: ScaleId::High5thModal1,
-                    random: 35.0,
-                    formant: 18.0,
-                    quantise: 35.0,
-                    level_db: -8.0,
-                    pan: -20.0,
-                },
+                HarmonyVoiceParams { enabled: true, dual: false, scale: ScaleId::LowOctave, random: 25.0, formant: -15.0, quantise: 35.0, level_db: -6.0, pan: -30.0 },
+                HarmonyVoiceParams { enabled: false, dual: false, scale: ScaleId::Unison, random: 20.0, formant: 0.0, quantise: 25.0, level_db: -8.0, pan: 10.0 },
+                HarmonyVoiceParams { enabled: true, dual: true, scale: ScaleId::High3rdModal1, random: 35.0, formant: 10.0, quantise: 35.0, level_db: -7.0, pan: 25.0 },
+                HarmonyVoiceParams { enabled: true, dual: true, scale: ScaleId::High5thModal1, random: 35.0, formant: 18.0, quantise: 35.0, level_db: -8.0, pan: -20.0 },
             ],
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct InputMeterLeds {
-    pub led_neg12: bool,
-    pub led_neg6: bool,
-    pub led_0_over: bool,
-}
+pub struct InputMeterLeds { pub led_neg12: bool, pub led_neg6: bool, pub led_0_over: bool }
 
 #[derive(Clone, Copy, Default)]
-struct VoiceSlewState {
-    gain_smooth: f32,
-    gl_smooth: f32,
-    gr_smooth: f32,
-    was_active: bool,
-}
+struct VoiceSlewState { gain_smooth: f32, gl_smooth: f32, gr_smooth: f32, was_active: bool }
 
 pub struct DecaBuddyProcessor {
     pub sample_rate: f32,
     pub host_offline: bool,
+    pub use_async_yin: bool,
     pub params: DecaBuddyParams,
     pub preset_slots: [DecaBuddyParams; 4],
     pub scale_bank: ScaleBank,
@@ -309,12 +162,15 @@ pub struct DecaBuddyProcessor {
     write_pos: usize,
     hop_counter: usize,
 
-    // Estagios fisicos modelados do Manual de Servico Akai HV10
-    impedance_filter: AkaiInputImpedanceFilter,
+    transformer_stage: InputTransformerStage,
     analog_oversampler: OversampledAnalogStage,
+    psu_sag: PowerSupply9VSag,
+    opamp_crosstalk: Njm4558StereoCrosstalk,
+    lpc_morpher: LpcFormantMorpher,
     sibilance_det: SibilanceDetector,
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
+    async_yin: AsyncYinWorker,
 
     pcm3003_recon_l: BiquadLowpass,
     pcm3003_recon_r: BiquadLowpass,
@@ -349,26 +205,26 @@ pub struct DecaBuddyProcessor {
     pub min_t0: usize,
     pub max_t0: usize,
 
-    dir_gain_smooth: f32,
-    dir_gl_smooth: f32,
-    dir_gr_smooth: f32,
-    uni_gain_smooth: f32,
-    uni_gl_smooth: f32,
-    uni_gr_smooth: f32,
+    dir_gain_smooth: f32, dir_gl_smooth: f32, dir_gr_smooth: f32,
+    uni_gain_smooth: f32, uni_gl_smooth: f32, uni_gr_smooth: f32,
     uni_was_active: bool,
     master_gain_smooth: f32,
+    bus_energy_smooth: f32,
 }
 
 impl DecaBuddyProcessor {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(8000.0);
-        let mut imp = AkaiInputImpedanceFilter::default();
-        imp.set_sample_rate(sr);
+        let mut xfmr = InputTransformerStage::default();
+        xfmr.set_sample_rate(sr);
         let mut analog_os = OversampledAnalogStage::default();
         analog_os.set_sample_rate(sr);
+        let mut psu = PowerSupply9VSag::default();
+        psu.set_sample_rate(sr);
         let mut lp = BiquadLowpass::default();
         lp.set_cutoff(310.96, sr);
         let pitch = PitchTracker::new(sr);
+        let async_yin = AsyncYinWorker::new(sr);
 
         let mut recon_l = BiquadLowpass::default();
         let mut recon_r = BiquadLowpass::default();
@@ -389,13 +245,9 @@ impl DecaBuddyProcessor {
         Self {
             sample_rate: sr,
             host_offline: false,
+            use_async_yin: false,
             params: default_params.clone(),
-            preset_slots: [
-                default_params.clone(),
-                default_params.clone(),
-                default_params.clone(),
-                default_params,
-            ],
+            preset_slots: [default_params.clone(), default_params.clone(), default_params.clone(), default_params],
             scale_bank: ScaleBank::default(),
             leds: InputMeterLeds::default(),
             hann_lut: dsp::build_hann_lut(),
@@ -405,11 +257,15 @@ impl DecaBuddyProcessor {
             sib_ring: vec![0.0; RING_SIZE],
             write_pos: init_write,
             hop_counter: 0,
-            impedance_filter: imp,
+            transformer_stage: xfmr,
             analog_oversampler: analog_os,
+            psu_sag: psu,
+            opamp_crosstalk: Njm4558StereoCrosstalk::default(),
+            lpc_morpher: LpcFormantMorpher::default(),
             sibilance_det: SibilanceDetector::default(),
             lp_filter: lp,
             pitch,
+            async_yin,
             pcm3003_recon_l: recon_l,
             pcm3003_recon_r: recon_r,
             nju7032_env: 0.0,
@@ -418,58 +274,34 @@ impl DecaBuddyProcessor {
             voiced_env: 0.0,
             unison_dsp: PsolaSubVoice::new(101).with_dual_warmth(),
             harmony_dsp: [
-                HarmonyChannelDsp::new(201),
-                HarmonyChannelDsp::new(301),
-                HarmonyChannelDsp::new(401),
-                HarmonyChannelDsp::new(501),
+                HarmonyChannelDsp::new(201), HarmonyChannelDsp::new(301),
+                HarmonyChannelDsp::new(401), HarmonyChannelDsp::new(501),
             ],
-            midi_target_note: [None; 4],
-            channel_note: [None; 4],
-            chord_notes_fifo: [0; 16],
-            chord_notes_len: 0,
-            sustain_pedal: false,
-            physically_held: [false; 128],
-            sustained_notes: [false; 128],
+            midi_target_note: [None; 4], channel_note: [None; 4],
+            chord_notes_fifo: [0; 16], chord_notes_len: 0,
+            sustain_pedal: false, physically_held: [false; 128], sustained_notes: [false; 128],
             last_flexi_shift: [None; 4],
             harmony_slew: [VoiceSlewState::default(); 4],
-            cached_pitch_ratio: [1.0; 4],
-            cached_formant_ratio: [1.0; 4],
-            cached_uni_ratio: 1.0,
-            max_grain,
-            lookahead,
-            out_delay,
-            live_lookahead,
-            live_out_delay,
-            min_t0,
-            max_t0,
-            dir_gain_smooth: 1.0,
-            dir_gl_smooth: 0.707,
-            dir_gr_smooth: 0.707,
-            uni_gain_smooth: 0.0,
-            uni_gl_smooth: 0.707,
-            uni_gr_smooth: 0.707,
-            uni_was_active: false,
-            master_gain_smooth: 1.0,
+            cached_pitch_ratio: [1.0; 4], cached_formant_ratio: [1.0; 4], cached_uni_ratio: 1.0,
+            max_grain, lookahead, out_delay, live_lookahead, live_out_delay, min_t0, max_t0,
+            dir_gain_smooth: 1.0, dir_gl_smooth: 0.707, dir_gr_smooth: 0.707,
+            uni_gain_smooth: 0.0, uni_gl_smooth: 0.707, uni_gr_smooth: 0.707,
+            uni_was_active: false, master_gain_smooth: 1.0, bus_energy_smooth: 0.0,
         }
     }
 
     #[inline]
-    pub fn is_live_low_latency(&self) -> bool {
-        self.params.live_mode && !self.host_offline
-    }
+    pub fn is_live_low_latency(&self) -> bool { self.params.live_mode && !self.host_offline }
 
     pub fn latency_samples(&self) -> u32 {
-        if self.is_live_low_latency() {
-            0
-        } else {
-            (self.lookahead + self.out_delay) as u32
-        }
+        if self.is_live_low_latency() { 0 } else { (self.lookahead + self.out_delay) as u32 }
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(8000.0);
-        self.impedance_filter.set_sample_rate(self.sample_rate);
+        self.transformer_stage.set_sample_rate(self.sample_rate);
         self.analog_oversampler.set_sample_rate(self.sample_rate);
+        self.psu_sag.set_sample_rate(self.sample_rate);
         self.lp_filter.set_cutoff(310.96, self.sample_rate);
         self.pcm3003_recon_l.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
         self.pcm3003_recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
@@ -481,8 +313,7 @@ impl DecaBuddyProcessor {
         self.live_lookahead = live_lookahead_for_sr(self.sample_rate);
         self.live_out_delay = live_out_delay_for_sr(self.sample_rate);
         self.min_t0 = ((20.0 * (self.sample_rate / 44_100.0)).round() as usize).max(2);
-        self.max_t0 = ((980.0 * (self.sample_rate / 44_100.0)).round() as usize)
-            .clamp(self.min_t0 + 1, 1020);
+        self.max_t0 = ((980.0 * (self.sample_rate / 44_100.0)).round() as usize).clamp(self.min_t0 + 1, 1020);
 
         self.reset();
     }
@@ -492,8 +323,11 @@ impl DecaBuddyProcessor {
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
         self.sib_ring.fill(0.0);
-        self.impedance_filter.reset();
+        self.transformer_stage.reset();
         self.analog_oversampler.reset();
+        self.psu_sag.reset();
+        self.opamp_crosstalk.reset();
+        self.lpc_morpher.reset();
         self.sibilance_det.reset();
         self.pitch.reset();
         self.pcm3003_recon_l.reset();
@@ -504,9 +338,7 @@ impl DecaBuddyProcessor {
         self.hop_counter = 0;
         self.voiced_env = 0.0;
         self.unison_dsp.reset();
-        for h in &mut self.harmony_dsp {
-            h.reset();
-        }
+        for h in &mut self.harmony_dsp { h.reset(); }
         self.midi_target_note = [None; 4];
         self.channel_note = [None; 4];
         self.chord_notes_len = 0;
@@ -514,26 +346,19 @@ impl DecaBuddyProcessor {
         self.physically_held = [false; 128];
         self.sustained_notes = [false; 128];
         self.last_flexi_shift = [None; 4];
-        for s in &mut self.harmony_slew {
-            *s = VoiceSlewState::default();
-        }
+        for s in &mut self.harmony_slew { *s = VoiceSlewState::default(); }
         self.cached_pitch_ratio = [1.0; 4];
         self.cached_formant_ratio = [1.0; 4];
         self.cached_uni_ratio = 1.0;
-        self.dir_gain_smooth = 1.0;
-        self.dir_gl_smooth = 0.707;
-        self.dir_gr_smooth = 0.707;
-        self.uni_gain_smooth = 0.0;
-        self.uni_gl_smooth = 0.707;
-        self.uni_gr_smooth = 0.707;
+        self.dir_gain_smooth = 1.0; self.dir_gl_smooth = 0.707; self.dir_gr_smooth = 0.707;
+        self.uni_gain_smooth = 0.0; self.uni_gl_smooth = 0.707; self.uni_gr_smooth = 0.707;
         self.uni_was_active = false;
         self.master_gain_smooth = 1.0;
+        self.bus_energy_smooth = 0.0;
     }
 
     pub fn save_preset_slot(&mut self, slot: usize) {
-        if slot < 4 {
-            self.preset_slots[slot] = self.params.clone();
-        }
+        if slot < 4 { self.preset_slots[slot] = self.params.clone(); }
     }
 
     pub fn recall_preset_slot(&mut self, slot: usize) {
@@ -543,27 +368,18 @@ impl DecaBuddyProcessor {
         }
     }
 
-    pub fn detected_pitch(&self) -> (f32, i32) {
-        (self.pitch.current_f0, self.pitch.current_note)
-    }
-
-    pub fn yin_hop_samples(&self) -> usize {
-        self.pitch.yin_hop
-    }
+    pub fn detected_pitch(&self) -> (f32, i32) { (self.pitch.current_f0, self.pitch.current_note) }
+    pub fn yin_hop_samples(&self) -> usize { self.pitch.yin_hop }
 
     pub fn set_vst_param_real(&mut self, index: usize, real_val: f32) -> bool {
-        if index >= NUM_VST_PARAMS {
-            return false;
-        }
+        if index >= NUM_VST_PARAMS { return false; }
         let spec = &VST_PARAM_SPECS[index];
         let val = real_val.clamp(spec.min, spec.max);
         match index {
             0 => {
                 let p = val.round() as i8;
                 self.params.preset = p;
-                if (0..=3).contains(&p) {
-                    self.recall_preset_slot(p as usize);
-                }
+                if (0..=3).contains(&p) { self.recall_preset_slot(p as usize); }
             }
             1 => self.params.key = val.round() as u8,
             2 => self.params.midi_base_channel = val.round() as u8,
@@ -649,9 +465,7 @@ impl DecaBuddyProcessor {
     }
 
     pub fn set_vst_param_normalized(&mut self, index: usize, norm: f32) -> bool {
-        if index >= NUM_VST_PARAMS {
-            return false;
-        }
+        if index >= NUM_VST_PARAMS { return false; }
         let spec = &VST_PARAM_SPECS[index];
         let real_val = spec.min + norm.clamp(0.0, 1.0) * (spec.max - spec.min);
         self.set_vst_param_real(index, real_val)
@@ -684,19 +498,14 @@ impl DecaBuddyProcessor {
 
         match msg_type {
             0x90 if data2 > 0 => {
-                if (offset_ch as usize) < 4 {
-                    self.channel_note[offset_ch as usize] = Some(data1);
-                }
+                if (offset_ch as usize) < 4 { self.channel_note[offset_ch as usize] = Some(data1); }
                 if ch == base_ch {
                     self.physically_held[note_idx] = true;
                     self.sustained_notes[note_idx] = false;
 
                     let mut found = false;
                     for i in 0..self.chord_notes_len {
-                        if self.chord_notes_fifo[i] == data1 {
-                            found = true;
-                            break;
-                        }
+                        if self.chord_notes_fifo[i] == data1 { found = true; break; }
                     }
                     if !found {
                         if self.chord_notes_len >= 16 {
@@ -738,9 +547,7 @@ impl DecaBuddyProcessor {
                                     self.sustained_notes[n] = false;
                                     self.remove_note_from_fifo(n as u8);
                                     for ch_slot in &mut self.channel_note {
-                                        if *ch_slot == Some(n as u8) {
-                                            *ch_slot = None;
-                                        }
+                                        if *ch_slot == Some(n as u8) { *ch_slot = None; }
                                     }
                                 }
                             }
@@ -789,9 +596,7 @@ impl DecaBuddyProcessor {
         }
 
         match self.params.midi_mode {
-            MidiHarmonyMode::MonoChannels => {
-                self.midi_target_note = self.channel_note;
-            }
+            MidiHarmonyMode::MonoChannels => { self.midi_target_note = self.channel_note; }
             MidiHarmonyMode::AutoChordOrMultiCh => {
                 let has_secondary_ch = self.channel_note[1..4].iter().any(|n| n.is_some());
                 if has_secondary_ch {
@@ -803,9 +608,7 @@ impl DecaBuddyProcessor {
                     sorted[..len].copy_from_slice(&self.chord_notes_fifo[..len]);
                     sorted[..len].sort_unstable();
                     for k in 0..num_active {
-                        if k < len {
-                            self.midi_target_note[active_voices[k]] = Some(sorted[k]);
-                        }
+                        if k < len { self.midi_target_note[active_voices[k]] = Some(sorted[k]); }
                     }
                 }
             }
@@ -837,28 +640,19 @@ impl DecaBuddyProcessor {
 
     pub fn process_block(&mut self, input_mono: &[f32], out_l: &mut [f32], out_r: &mut [f32]) {
         let n = input_mono.len().min(out_l.len()).min(out_r.len());
-        if n == 0 {
-            return;
-        }
-        // Ativa FTZ/DAZ nativo na CPU uma unica vez para todo o bloco
+        if n == 0 { return; }
         let _ftz_daz_guard = ScopedFtzDaz::new();
 
         self.refresh_midi_targets();
 
         let in_gain = gain_db_to_lin(self.params.input_gain_db);
-        let target_master_gain = if self.params.bypass {
-            1.0
-        } else {
-            voice_db_to_lin(self.params.master_level_db)
-        };
+        let target_master_gain = if self.params.bypass { 1.0 } else { voice_db_to_lin(self.params.master_level_db) };
 
         let live_low_lat = self.is_live_low_latency();
         if live_low_lat != self.prev_live_low_lat {
             self.prev_live_low_lat = live_low_lat;
             self.unison_dsp.reset();
-            for h in &mut self.harmony_dsp {
-                h.reset();
-            }
+            for h in &mut self.harmony_dsp { h.reset(); }
         }
 
         let active_lookahead = if live_low_lat { self.live_lookahead } else { self.lookahead };
@@ -867,63 +661,38 @@ impl DecaBuddyProcessor {
 
         let target_dir_gain = if !self.params.bypass && self.params.direct.enabled {
             voice_db_to_lin(self.params.direct.level_db)
-        } else if self.params.bypass {
-            1.0
-        } else {
-            0.0
-        };
+        } else if self.params.bypass { 1.0 } else { 0.0 };
         let (dir_target_gl, dir_target_gr) = pan50_to_gains(self.params.direct.pan);
 
         let target_uni_gain = if !self.params.bypass && self.params.unison.enabled {
             voice_db_to_lin(self.params.unison.level_db)
-        } else {
-            0.0
-        };
+        } else { 0.0 };
         let (uni_target_gl, uni_target_gr) = pan50_to_gains(self.params.unison.pan);
         let uni_formant_ratio = 2.0_f32.powf((self.params.unison.formant * 0.09) / 12.0);
         let uni_rand_norm = (self.params.unison.random * 0.01).clamp(0.0, 1.0);
 
         #[derive(Clone, Copy)]
         struct PreVoice {
-            enabled: bool,
-            dual: bool,
-            target_gain: f32,
-            target_gl: f32,
-            target_gr: f32,
-            d_gl: f32,
-            d_gr: f32,
-            dual_formant_ratio: f32,
-            rand_norm: f32,
-            base_delay_ms: f32,
+            enabled: bool, dual: bool, target_gain: f32,
+            target_gl: f32, target_gr: f32, d_gl: f32, d_gr: f32,
+            dual_formant_ratio: f32, rand_norm: f32, base_delay_ms: f32,
         }
 
         let mut pre_voices = [PreVoice {
-            enabled: false,
-            dual: false,
-            target_gain: 0.0,
-            target_gl: 0.0,
-            target_gr: 0.0,
-            d_gl: 0.0,
-            d_gr: 0.0,
-            dual_formant_ratio: 1.0,
-            rand_norm: 0.0,
-            base_delay_ms: 0.0,
+            enabled: false, dual: false, target_gain: 0.0,
+            target_gl: 0.0, target_gr: 0.0, d_gl: 0.0, d_gr: 0.0,
+            dual_formant_ratio: 1.0, rand_norm: 0.0, base_delay_ms: 0.0,
         }; 4];
 
+        let mut num_active_voices = 0usize;
         for v_idx in 0..4 {
             let mut vp = self.params.harmonies[v_idx];
             if self.params.link && v_idx > 0 {
                 let h0 = self.params.harmonies[0];
-                vp.random = h0.random;
-                vp.formant = h0.formant;
-                vp.quantise = h0.quantise;
+                vp.random = h0.random; vp.formant = h0.formant; vp.quantise = h0.quantise;
             }
-
-            let raw_gain = if !self.params.bypass && vp.enabled {
-                voice_db_to_lin(vp.level_db)
-            } else {
-                0.0
-            };
+            if vp.enabled { num_active_voices += if vp.dual { 2 } else { 1 }; }
+            let raw_gain = if !self.params.bypass && vp.enabled { voice_db_to_lin(vp.level_db) } else { 0.0 };
             let (gl, gr) = pan50_to_gains(vp.pan);
             let (d_gl, d_gr) = pan50_to_gains(-vp.pan);
             let dual_formant_ratio = 2.0_f32.powf(((vp.formant * 0.09) + 0.2) / 12.0);
@@ -932,23 +701,18 @@ impl DecaBuddyProcessor {
             let effective_gain = if vp.dual { raw_gain * 0.75 } else { raw_gain };
 
             pre_voices[v_idx] = PreVoice {
-                enabled: vp.enabled,
-                dual: vp.dual,
-                target_gain: effective_gain,
-                target_gl: gl,
-                target_gr: gr,
-                d_gl,
-                d_gr,
-                dual_formant_ratio,
-                rand_norm,
-                base_delay_ms,
+                enabled: vp.enabled, dual: vp.dual, target_gain: effective_gain,
+                target_gl: gl, target_gr: gr, d_gl, d_gr,
+                dual_formant_ratio, rand_norm, base_delay_ms,
             };
         }
 
+        let async_mode = self.use_async_yin && !self.host_offline;
+
         for i in 0..n {
-            // 1. Curva de impedancia XLR (4k) / Line (33k) + Oversampling Polifasico 2x (2SC3330 + NJM4558L + 5Hz DC Blocker)
-            let imp_x = self.impedance_filter.process(input_mono[i] * in_gain);
-            let x = self.analog_oversampler.process(imp_x);
+            let rail_limit = self.psu_sag.step_rail(self.bus_energy_smooth, num_active_voices);
+            let xfmr_x = self.transformer_stage.process(input_mono[i] * in_gain);
+            let x = self.analog_oversampler.process_with_rail(xfmr_x, rail_limit);
 
             let abs_x = x.abs();
             if abs_x > self.nju7032_env {
@@ -963,60 +727,66 @@ impl DecaBuddyProcessor {
             self.lp_ring[w_idx] = lp_x;
             let sib = self.sibilance_det.step(x, lp_x);
             self.sib_ring[w_idx] = sib;
+            self.lpc_morpher.track_sample(x);
 
-            // 2. Time-Slicing do YIN: captura o frame no inicio do hop e processa uma fatia por amostra
             let was_voiced = self.pitch.voiced;
-            if self.hop_counter == 0 {
-                self.pitch.begin_sliced_frame(&self.dry_ring, self.write_pos, self.sample_rate);
-            }
-            self.hop_counter += 1;
-            if self.hop_counter >= yin_hop {
-                self.hop_counter = 0;
-            }
-
-            let frame_done = self.pitch.step_time_slice(self.sample_rate, self.params.tune_hz);
-            if frame_done && self.pitch.voiced {
-                let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
-                self.lp_filter.set_cutoff(cutoff, self.sample_rate);
-
-                let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
-                let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
-                self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
-
-                for v_idx in 0..4 {
-                    let mut vp = self.params.harmonies[v_idx];
-                    if self.params.link && v_idx > 0 {
-                        let h0 = self.params.harmonies[0];
-                        vp.random = h0.random;
-                        vp.formant = h0.formant;
-                        vp.quantise = h0.quantise;
-                    }
-                    self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
-                    self.cached_pitch_ratio[v_idx] = if let Some(shift) =
-                        self.compute_voice_shift_semitones(v_idx, &vp)
-                    {
-                        2.0_f32.powf(shift / 12.0)
-                    } else {
-                        1.0
-                    };
+            let frame_done = if async_mode {
+                self.async_yin.push_sample(self.write_pos, x);
+                self.hop_counter += 1;
+                if self.hop_counter >= yin_hop {
+                    self.hop_counter = 0;
+                    self.async_yin.trigger_job(self.write_pos, self.sample_rate, self.params.tune_hz);
                 }
+                self.async_yin.poll_result(&mut self.pitch)
+            } else {
+                if self.hop_counter == 0 {
+                    self.pitch.begin_sliced_frame(&self.dry_ring, self.write_pos, self.sample_rate);
+                }
+                self.hop_counter += 1;
+                if self.hop_counter >= yin_hop {
+                    self.hop_counter = 0;
+                }
+                self.pitch.step_time_slice(self.sample_rate, self.params.tune_hz)
+            };
 
-                if !was_voiced {
-                    let t0 = (self.sample_rate / self.pitch.current_f0)
-                        .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
-                    let r = (t0 / 2).max(2);
-                    let center = self.write_pos.wrapping_sub(active_lookahead);
-                    let mut best_p = center;
-                    let mut best_v = -1e9_f32;
-                    for k in 0..(2 * r + 1) {
-                        let p = center.wrapping_sub(r).wrapping_add(k);
-                        let v = self.lp_ring[p & RING_MASK];
-                        if v > best_v {
-                            best_v = v;
-                            best_p = p;
+            if frame_done {
+                self.lpc_morpher.update_coefficients();
+                if self.pitch.voiced {
+                    let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
+                    self.lp_filter.set_cutoff(cutoff, self.sample_rate);
+
+                    let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
+                    let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
+                    self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
+
+                    for v_idx in 0..4 {
+                        let mut vp = self.params.harmonies[v_idx];
+                        if self.params.link && v_idx > 0 {
+                            let h0 = self.params.harmonies[0];
+                            vp.random = h0.random; vp.formant = h0.formant; vp.quantise = h0.quantise;
                         }
+                        self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
+                        self.cached_pitch_ratio[v_idx] = if let Some(shift) =
+                            self.compute_voice_shift_semitones(v_idx, &vp)
+                        {
+                            2.0_f32.powf(shift / 12.0)
+                        } else { 1.0 };
                     }
-                    self.latest_mark = best_p;
+
+                    if !was_voiced {
+                        let t0 = (self.sample_rate / self.pitch.current_f0)
+                            .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
+                        let r = (t0 / 2).max(2);
+                        let center = self.write_pos.wrapping_sub(active_lookahead);
+                        let mut best_p = center;
+                        let mut best_v = -1e9_f32;
+                        for k in 0..(2 * r + 1) {
+                            let p = center.wrapping_sub(r).wrapping_add(k);
+                            let v = self.lp_ring[p & RING_MASK];
+                            if v > best_v { best_v = v; best_p = p; }
+                        }
+                        self.latest_mark = best_p;
+                    }
                 }
             }
 
@@ -1028,6 +798,8 @@ impl DecaBuddyProcessor {
             let emit_pos = read_pos.wrapping_sub(active_out_delay);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
             let emit_sib = self.sib_ring[emit_pos & RING_MASK];
+            let lpc_a1 = self.lpc_morpher.a1;
+            let lpc_a2 = self.lpc_morpher.a2;
 
             let dry_signal = if live_low_lat { x } else { self.dry_ring[emit_pos & RING_MASK] };
 
@@ -1050,25 +822,11 @@ impl DecaBuddyProcessor {
             if uni_active {
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample_with_cache(
-                    &self.dry_ring,
-                    &self.hann_lut,
-                    None,
-                    emit_sib,
-                    self.write_pos,
-                    read_pos,
-                    emit_pos,
-                    self.latest_mark,
-                    self.voiced_env,
-                    emit_mask,
-                    self.pitch.current_f0,
-                    self.cached_uni_ratio,
-                    uni_formant_ratio,
-                    uni_rand_norm,
-                    0.0,
-                    11.0 * uni_rand_norm,
-                    0.35,
-                    self.sample_rate,
-                    self.max_grain,
+                    &self.dry_ring, &self.hann_lut, None, emit_sib, lpc_a1, lpc_a2,
+                    self.write_pos, read_pos, emit_pos, self.latest_mark,
+                    self.voiced_env, emit_mask, self.pitch.current_f0,
+                    self.cached_uni_ratio, uni_formant_ratio, uni_rand_norm,
+                    0.0, 11.0 * uni_rand_norm, 0.35, self.sample_rate, self.max_grain,
                 );
                 mix_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
                 mix_r += y_u * (self.uni_gain_smooth * self.uni_gr_smooth);
@@ -1083,9 +841,7 @@ impl DecaBuddyProcessor {
 
                 let target_voice_gain = if pv.enabled && self.pitch.voiced && self.pitch.current_note >= 0 {
                     pv.target_gain
-                } else {
-                    0.0
-                };
+                } else { 0.0 };
 
                 s.gain_smooth = 0.995 * s.gain_smooth + 0.005 * target_voice_gain;
                 s.gl_smooth = 0.995 * s.gl_smooth + 0.005 * pv.target_gl;
@@ -1104,51 +860,26 @@ impl DecaBuddyProcessor {
                 let pitch_ratio = self.cached_pitch_ratio[v_idx];
                 let formant_ratio = self.cached_formant_ratio[v_idx];
 
-                // Extracao compartilhada de grao entre Main e Dual quando Dual esta ativo
                 let ch_dsp = &mut self.harmony_dsp[v_idx];
                 let y_main = ch_dsp.main.step_sample_with_cache(
-                    &self.dry_ring,
-                    &self.hann_lut,
+                    &self.dry_ring, &self.hann_lut,
                     if pv.dual { Some(&mut ch_dsp.shared_grain) } else { None },
-                    emit_sib,
-                    self.write_pos,
-                    read_pos,
-                    emit_pos,
-                    self.latest_mark,
-                    self.voiced_env,
-                    emit_mask,
-                    self.pitch.current_f0,
-                    pitch_ratio,
-                    formant_ratio,
-                    pv.rand_norm,
-                    0.0,
-                    pv.base_delay_ms,
-                    0.0,
-                    self.sample_rate,
-                    self.max_grain,
+                    emit_sib, lpc_a1, lpc_a2,
+                    self.write_pos, read_pos, emit_pos, self.latest_mark,
+                    self.voiced_env, emit_mask, self.pitch.current_f0,
+                    pitch_ratio, formant_ratio, pv.rand_norm,
+                    0.0, pv.base_delay_ms, 0.0, self.sample_rate, self.max_grain,
                 );
 
                 if pv.dual {
                     let y_dual = ch_dsp.dual.step_sample_with_cache(
-                        &self.dry_ring,
-                        &self.hann_lut,
+                        &self.dry_ring, &self.hann_lut,
                         Some(&mut ch_dsp.shared_grain),
-                        emit_sib,
-                        self.write_pos,
-                        read_pos,
-                        emit_pos,
-                        self.latest_mark,
-                        self.voiced_env,
-                        emit_mask,
-                        self.pitch.current_f0,
-                        pitch_ratio,
-                        pv.dual_formant_ratio,
-                        pv.rand_norm,
-                        -9.0,
-                        pv.base_delay_ms + 14.0,
-                        0.0,
-                        self.sample_rate,
-                        self.max_grain,
+                        emit_sib, lpc_a1, lpc_a2,
+                        self.write_pos, read_pos, emit_pos, self.latest_mark,
+                        self.voiced_env, emit_mask, self.pitch.current_f0,
+                        pitch_ratio, pv.dual_formant_ratio, pv.rand_norm,
+                        -9.0, pv.base_delay_ms + 14.0, 0.0, self.sample_rate, self.max_grain,
                     );
                     mix_l += (y_main * s.gl_smooth + y_dual * pv.d_gl) * s.gain_smooth;
                     mix_r += (y_main * s.gr_smooth + y_dual * pv.d_gr) * s.gain_smooth;
@@ -1160,9 +891,11 @@ impl DecaBuddyProcessor {
 
             let recon_l = self.pcm3003_recon_l.process(mix_l * self.master_gain_smooth);
             let recon_r = self.pcm3003_recon_r.process(mix_r * self.master_gain_smooth);
-            out_l[i] = soft_saturate(recon_l);
-            out_r[i] = soft_saturate(recon_r);
+            let (xt_l, xt_r) = self.opamp_crosstalk.process_stereo(recon_l, recon_r);
+            out_l[i] = soft_saturate(xt_l);
+            out_r[i] = soft_saturate(xt_r);
 
+            self.bus_energy_smooth = 0.995 * self.bus_energy_smooth + 0.005 * (out_l[i].abs() + out_r[i].abs());
             self.write_pos = self.write_pos.wrapping_add(1);
         }
 
@@ -1197,19 +930,14 @@ impl DecaBuddyProcessor {
             for k in 0..span {
                 let p = start.wrapping_add(k);
                 let v = self.lp_ring[p & RING_MASK];
-                if v > best_val {
-                    best_val = v;
-                    best_pos = p;
-                }
+                if v > best_val { best_val = v; best_pos = p; }
             }
             self.latest_mark = best_pos;
         }
     }
 
     fn compute_voice_shift_semitones(&mut self, v_idx: usize, vp: &HarmonyVoiceParams) -> Option<f32> {
-        if self.pitch.current_note < 0 {
-            return None;
-        }
+        if self.pitch.current_note < 0 { return None; }
         let q_norm = (vp.quantise * 0.01).clamp(0.0, 1.0);
         let note = self.pitch.current_note;
         let dev = self.pitch.current_midi - (note as f32);
@@ -1233,19 +961,12 @@ impl DecaBuddyProcessor {
     }
 
     fn flexichord_jazz_shift(&self, v_idx: usize, input_note: i32) -> Option<i32> {
-        if self.chord_notes_len == 0 {
-            return None;
-        }
+        if self.chord_notes_len == 0 { return None; }
         let len = self.chord_notes_len.min(16);
-        if len == 1 {
-            return Some(self.chord_notes_fifo[0] as i32 - input_note);
-        }
+        if len == 1 { return Some(self.chord_notes_fifo[0] as i32 - input_note); }
 
         let mut chord_mask = [false; 12];
-        for i in 0..len {
-            let pc = (self.chord_notes_fifo[i] as usize) % 12;
-            chord_mask[pc] = true;
-        }
+        for i in 0..len { chord_mask[(self.chord_notes_fifo[i] as usize) % 12] = true; }
 
         let mut unique_count = chord_mask.iter().filter(|&&b| b).count();
         if unique_count < 3 {
@@ -1253,13 +974,11 @@ impl DecaBuddyProcessor {
             const DIATONIC: [usize; 7] = [0, 2, 4, 5, 7, 9, 11];
             for &deg in &DIATONIC {
                 let candidate = (key_pc + deg) % 12;
-                let clashes = (chord_mask[(candidate + 1) % 12]) || (chord_mask[(candidate + 11) % 12]);
+                let clashes = chord_mask[(candidate + 1) % 12] || chord_mask[(candidate + 11) % 12];
                 if !chord_mask[candidate] && !clashes {
                     chord_mask[candidate] = true;
                     unique_count += 1;
-                    if unique_count >= 4 {
-                        break;
-                    }
+                    if unique_count >= 4 { break; }
                 }
             }
         }
@@ -1292,7 +1011,6 @@ impl DecaBuddyProcessor {
                 return Some(prev_s);
             }
         }
-
         chosen_step
     }
 }
@@ -1323,160 +1041,86 @@ pub mod truce_integration {
 
     #[derive(ParamEnum, Debug)]
     pub enum ScaleChoice {
-        #[name = "MIDI"] Midi,
-        #[name = "User"] User,
-        #[name = "Low Octave"] LowOctave,
-        #[name = "Low 3rd | Mod 1"] Low3rdModal1,
-        #[name = "Low 3rd | Mod 2"] Low3rdModal2,
-        #[name = "Low 3rd | Mod 3"] Low3rdModal3,
-        #[name = "Low 3rd | Mod 4"] Low3rdModal4,
-        #[name = "Low 3rd | Mod 5"] Low3rdModal5,
-        #[name = "Low 3rd | Har Min"] Low3rdHarmonicMinor,
-        #[name = "Low 3rd | Mel Min"] Low3rdMelodicMinor,
-        #[name = "Low 5th | Mod 1"] Low5thModal1,
-        #[name = "Low 5th | Mod 2"] Low5thModal2,
-        #[name = "Low 5th | Mod 3"] Low5thModal3,
-        #[name = "Low 5th | Mod 4"] Low5thModal4,
-        #[name = "Low 5th | Mod 5"] Low5thModal5,
-        #[name = "Low 5th | Har Min"] Low5thHarmonicMinor,
-        #[name = "Low 5th | Mel Min"] Low5thMelodicMinor,
-        #[name = "Low 7th | Major"] Low7thMajor,
-        #[name = "Low 7th | Minor"] Low7thMinor,
-        #[name = "Unison"] Unison,
-        #[name = "High 3rd | Mod 1"] High3rdModal1,
-        #[name = "High 3rd | Mod 2"] High3rdModal2,
-        #[name = "High 3rd | Mod 3"] High3rdModal3,
-        #[name = "High 3rd | Mod 4"] High3rdModal4,
-        #[name = "High 3rd | Mod 5"] High3rdModal5,
-        #[name = "High 3rd | Har Min"] High3rdHarmonicMinor,
-        #[name = "High 3rd | Mel Min"] High3rdMelodicMinor,
-        #[name = "High 5th | Mod 1"] High5thModal1,
-        #[name = "High 5th | Mod 2"] High5thModal2,
-        #[name = "High 5th | Mod 3"] High5thModal3,
-        #[name = "High 5th | Mod 4"] High5thModal4,
-        #[name = "High 5th | Mod 5"] High5thModal5,
-        #[name = "High 5th | Har Min"] High5thHarmonicMinor,
-        #[name = "High 5th | Mel Min"] High5thMelodicMinor,
-        #[name = "High 7th | Major"] High7thMajor,
-        #[name = "High 7th | Minor"] High7thMinor,
-        #[name = "High Octave"] HighOctave,
+        #[name = "MIDI"] Midi, #[name = "User"] User, #[name = "Low Octave"] LowOctave,
+        #[name = "Low 3rd | Mod 1"] Low3rdModal1, #[name = "Low 3rd | Mod 2"] Low3rdModal2,
+        #[name = "Low 3rd | Mod 3"] Low3rdModal3, #[name = "Low 3rd | Mod 4"] Low3rdModal4,
+        #[name = "Low 3rd | Mod 5"] Low3rdModal5, #[name = "Low 3rd | Har Min"] Low3rdHarmonicMinor,
+        #[name = "Low 3rd | Mel Min"] Low3rdMelodicMinor, #[name = "Low 5th | Mod 1"] Low5thModal1,
+        #[name = "Low 5th | Mod 2"] Low5thModal2, #[name = "Low 5th | Mod 3"] Low5thModal3,
+        #[name = "Low 5th | Mod 4"] Low5thModal4, #[name = "Low 5th | Mod 5"] Low5thModal5,
+        #[name = "Low 5th | Har Min"] Low5thHarmonicMinor, #[name = "Low 5th | Mel Min"] Low5thMelodicMinor,
+        #[name = "Low 7th | Major"] Low7thMajor, #[name = "Low 7th | Minor"] Low7thMinor,
+        #[name = "Unison"] Unison, #[name = "High 3rd | Mod 1"] High3rdModal1,
+        #[name = "High 3rd | Mod 2"] High3rdModal2, #[name = "High 3rd | Mod 3"] High3rdModal3,
+        #[name = "High 3rd | Mod 4"] High3rdModal4, #[name = "High 3rd | Mod 5"] High3rdModal5,
+        #[name = "High 3rd | Har Min"] High3rdHarmonicMinor, #[name = "High 3rd | Mel Min"] High3rdMelodicMinor,
+        #[name = "High 5th | Mod 1"] High5thModal1, #[name = "High 5th | Mod 2"] High5thModal2,
+        #[name = "High 5th | Mod 3"] High5thModal3, #[name = "High 5th | Mod 4"] High5thModal4,
+        #[name = "High 5th | Mod 5"] High5thModal5, #[name = "High 5th | Har Min"] High5thHarmonicMinor,
+        #[name = "High 5th | Mel Min"] High5thMelodicMinor, #[name = "High 7th | Major"] High7thMajor,
+        #[name = "High 7th | Minor"] High7thMinor, #[name = "High Octave"] HighOctave,
     }
 
     #[derive(Params)]
     pub struct ChorusVoxParams {
-        #[param(name = "Key", default = 0)]
-        pub key: EnumParam<KeyChoice>,
-        #[param(name = "MIDI Mode", default = 0)]
-        pub midi_mode: EnumParam<MidiModeChoice>,
-        #[param(name = "MIDI Ch", range = "linear(1, 16)", default = 1)]
-        pub midi_ch: IntParam,
-        #[param(name = "Tune", range = "linear(427, 453)", default = 440.0, unit = "Hz")]
-        pub tune: FloatParam,
-        #[param(name = "In Gain", range = "linear(-15, 15)", default = 0.0, unit = "dB")]
-        pub input_gain: FloatParam,
-        #[param(name = "Live", default = true)]
-        pub live_mode: BoolParam,
-        #[param(name = "Link", default = false)]
-        pub link: BoolParam,
+        #[param(name = "Key", default = 0)] pub key: EnumParam<KeyChoice>,
+        #[param(name = "MIDI Mode", default = 0)] pub midi_mode: EnumParam<MidiModeChoice>,
+        #[param(name = "MIDI Ch", range = "linear(1, 16)", default = 1)] pub midi_ch: IntParam,
+        #[param(name = "Tune", range = "linear(427, 453)", default = 440.0, unit = "Hz")] pub tune: FloatParam,
+        #[param(name = "In Gain", range = "linear(-15, 15)", default = 0.0, unit = "dB")] pub input_gain: FloatParam,
+        #[param(name = "Live", default = true)] pub live_mode: BoolParam,
+        #[param(name = "Link", default = false)] pub link: BoolParam,
 
-        #[param(name = "Direct", default = true)]
-        pub direct_on: BoolParam,
-        #[param(name = "Dir Lev", range = "linear(-24, 0)", default = 0.0, unit = "dB")]
-        pub direct_level: FloatParam,
-        #[param(name = "Dir Pan", range = "linear(-50, 50)", default = 0.0)]
-        pub direct_pan: FloatParam,
+        #[param(name = "Direct", default = true)] pub direct_on: BoolParam,
+        #[param(name = "Dir Lev", range = "linear(-24, 0)", default = 0.0, unit = "dB")] pub direct_level: FloatParam,
+        #[param(name = "Dir Pan", range = "linear(-50, 50)", default = 0.0)] pub direct_pan: FloatParam,
 
-        #[param(name = "Unison", default = false)]
-        pub unison_on: BoolParam,
-        #[param(name = "U.Rand", range = "linear(0, 100)", default = 0.0)]
-        pub unison_random: FloatParam,
-        #[param(name = "U.Form", range = "linear(-50, 50)", default = 0.0)]
-        pub unison_formant: FloatParam,
-        #[param(name = "U.Quant", range = "linear(0, 100)", default = 0.0)]
-        pub unison_quantise: FloatParam,
-        #[param(name = "U.Level", range = "linear(-24, 0)", default = 0.0, unit = "dB")]
-        pub unison_level: FloatParam,
-        #[param(name = "U.Pan", range = "linear(-50, 50)", default = 0.0)]
-        pub unison_pan: FloatParam,
+        #[param(name = "Unison", default = false)] pub unison_on: BoolParam,
+        #[param(name = "U.Rand", range = "linear(0, 100)", default = 0.0)] pub unison_random: FloatParam,
+        #[param(name = "U.Form", range = "linear(-50, 50)", default = 0.0)] pub unison_formant: FloatParam,
+        #[param(name = "U.Quant", range = "linear(0, 100)", default = 0.0)] pub unison_quantise: FloatParam,
+        #[param(name = "U.Level", range = "linear(-24, 0)", default = 0.0, unit = "dB")] pub unison_level: FloatParam,
+        #[param(name = "U.Pan", range = "linear(-50, 50)", default = 0.0)] pub unison_pan: FloatParam,
 
-        // Harmony 1
-        #[param(name = "H1 Scale", default = 2)]
-        pub h1_scale: EnumParam<ScaleChoice>,
-        #[param(name = "H1 On", default = true)]
-        pub h1_on: BoolParam,
-        #[param(name = "H1 Dual", default = false)]
-        pub h1_dual: BoolParam,
-        #[param(name = "H1 Rand", range = "linear(0, 100)", default = 25.0)]
-        pub h1_random: FloatParam,
-        #[param(name = "H1 Form", range = "linear(-50, 50)", default = -15.0)]
-        pub h1_formant: FloatParam,
-        #[param(name = "H1 Quant", range = "linear(0, 100)", default = 35.0)]
-        pub h1_quantise: FloatParam,
-        #[param(name = "H1 Level", range = "linear(-24, 0)", default = -6.0, unit = "dB")]
-        pub h1_level: FloatParam,
-        #[param(name = "H1 Pan", range = "linear(-50, 50)", default = -30.0)]
-        pub h1_pan: FloatParam,
+        #[param(name = "H1 Scale", default = 2)] pub h1_scale: EnumParam<ScaleChoice>,
+        #[param(name = "H1 On", default = true)] pub h1_on: BoolParam,
+        #[param(name = "H1 Dual", default = false)] pub h1_dual: BoolParam,
+        #[param(name = "H1 Rand", range = "linear(0, 100)", default = 25.0)] pub h1_random: FloatParam,
+        #[param(name = "H1 Form", range = "linear(-50, 50)", default = -15.0)] pub h1_formant: FloatParam,
+        #[param(name = "H1 Quant", range = "linear(0, 100)", default = 35.0)] pub h1_quantise: FloatParam,
+        #[param(name = "H1 Level", range = "linear(-24, 0)", default = -6.0, unit = "dB")] pub h1_level: FloatParam,
+        #[param(name = "H1 Pan", range = "linear(-50, 50)", default = -30.0)] pub h1_pan: FloatParam,
 
-        // Harmony 2
-        #[param(name = "H2 Scale", default = 19)]
-        pub h2_scale: EnumParam<ScaleChoice>,
-        #[param(name = "H2 On", default = false)]
-        pub h2_on: BoolParam,
-        #[param(name = "H2 Dual", default = false)]
-        pub h2_dual: BoolParam,
-        #[param(name = "H2 Rand", range = "linear(0, 100)", default = 20.0)]
-        pub h2_random: FloatParam,
-        #[param(name = "H2 Form", range = "linear(-50, 50)", default = 0.0)]
-        pub h2_formant: FloatParam,
-        #[param(name = "H2 Quant", range = "linear(0, 100)", default = 25.0)]
-        pub h2_quantise: FloatParam,
-        #[param(name = "H2 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")]
-        pub h2_level: FloatParam,
-        #[param(name = "H2 Pan", range = "linear(-50, 50)", default = 10.0)]
-        pub h2_pan: FloatParam,
+        #[param(name = "H2 Scale", default = 19)] pub h2_scale: EnumParam<ScaleChoice>,
+        #[param(name = "H2 On", default = false)] pub h2_on: BoolParam,
+        #[param(name = "H2 Dual", default = false)] pub h2_dual: BoolParam,
+        #[param(name = "H2 Rand", range = "linear(0, 100)", default = 20.0)] pub h2_random: FloatParam,
+        #[param(name = "H2 Form", range = "linear(-50, 50)", default = 0.0)] pub h2_formant: FloatParam,
+        #[param(name = "H2 Quant", range = "linear(0, 100)", default = 25.0)] pub h2_quantise: FloatParam,
+        #[param(name = "H2 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")] pub h2_level: FloatParam,
+        #[param(name = "H2 Pan", range = "linear(-50, 50)", default = 10.0)] pub h2_pan: FloatParam,
 
-        // Harmony 3
-        #[param(name = "H3 Scale", default = 20)]
-        pub h3_scale: EnumParam<ScaleChoice>,
-        #[param(name = "H3 On", default = true)]
-        pub h3_on: BoolParam,
-        #[param(name = "H3 Dual", default = true)]
-        pub h3_dual: BoolParam,
-        #[param(name = "H3 Rand", range = "linear(0, 100)", default = 35.0)]
-        pub h3_random: FloatParam,
-        #[param(name = "H3 Form", range = "linear(-50, 50)", default = 10.0)]
-        pub h3_formant: FloatParam,
-        #[param(name = "H3 Quant", range = "linear(0, 100)", default = 35.0)]
-        pub h3_quantise: FloatParam,
-        #[param(name = "H3 Level", range = "linear(-24, 0)", default = -7.0, unit = "dB")]
-        pub h3_level: FloatParam,
-        #[param(name = "H3 Pan", range = "linear(-50, 50)", default = 25.0)]
-        pub h3_pan: FloatParam,
+        #[param(name = "H3 Scale", default = 20)] pub h3_scale: EnumParam<ScaleChoice>,
+        #[param(name = "H3 On", default = true)] pub h3_on: BoolParam,
+        #[param(name = "H3 Dual", default = true)] pub h3_dual: BoolParam,
+        #[param(name = "H3 Rand", range = "linear(0, 100)", default = 35.0)] pub h3_random: FloatParam,
+        #[param(name = "H3 Form", range = "linear(-50, 50)", default = 10.0)] pub h3_formant: FloatParam,
+        #[param(name = "H3 Quant", range = "linear(0, 100)", default = 35.0)] pub h3_quantise: FloatParam,
+        #[param(name = "H3 Level", range = "linear(-24, 0)", default = -7.0, unit = "dB")] pub h3_level: FloatParam,
+        #[param(name = "H3 Pan", range = "linear(-50, 50)", default = 25.0)] pub h3_pan: FloatParam,
 
-        // Harmony 4
-        #[param(name = "H4 Scale", default = 27)]
-        pub h4_scale: EnumParam<ScaleChoice>,
-        #[param(name = "H4 On", default = true)]
-        pub h4_on: BoolParam,
-        #[param(name = "H4 Dual", default = true)]
-        pub h4_dual: BoolParam,
-        #[param(name = "H4 Rand", range = "linear(0, 100)", default = 35.0)]
-        pub h4_random: FloatParam,
-        #[param(name = "H4 Form", range = "linear(-50, 50)", default = 18.0)]
-        pub h4_formant: FloatParam,
-        #[param(name = "H4 Quant", range = "linear(0, 100)", default = 35.0)]
-        pub h4_quantise: FloatParam,
-        #[param(name = "H4 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")]
-        pub h4_level: FloatParam,
-        #[param(name = "H4 Pan", range = "linear(-50, 50)", default = -20.0)]
-        pub h4_pan: FloatParam,
+        #[param(name = "H4 Scale", default = 27)] pub h4_scale: EnumParam<ScaleChoice>,
+        #[param(name = "H4 On", default = true)] pub h4_on: BoolParam,
+        #[param(name = "H4 Dual", default = true)] pub h4_dual: BoolParam,
+        #[param(name = "H4 Rand", range = "linear(0, 100)", default = 35.0)] pub h4_random: FloatParam,
+        #[param(name = "H4 Form", range = "linear(-50, 50)", default = 18.0)] pub h4_formant: FloatParam,
+        #[param(name = "H4 Quant", range = "linear(0, 100)", default = 35.0)] pub h4_quantise: FloatParam,
+        #[param(name = "H4 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")] pub h4_level: FloatParam,
+        #[param(name = "H4 Pan", range = "linear(-50, 50)", default = -20.0)] pub h4_pan: FloatParam,
 
-        #[meter]
-        pub meter_in: MeterSlot,
-        #[meter]
-        pub meter_out_l: MeterSlot,
-        #[meter]
-        pub meter_out_r: MeterSlot,
+        #[meter] pub meter_in: MeterSlot,
+        #[meter] pub meter_out_l: MeterSlot,
+        #[meter] pub meter_out_r: MeterSlot,
     }
 
     use ChorusVoxParamsParamId as P;
@@ -1490,8 +1134,10 @@ pub mod truce_integration {
 
     impl Default for ChorusVoxDsp {
         fn default() -> Self {
+            let mut core = DecaBuddyProcessor::new(44_100.0);
+            core.use_async_yin = true;
             Self {
-                core: DecaBuddyProcessor::new(44_100.0),
+                core,
                 mono_scratch: vec![0.0; 4096],
                 out_l_scratch: vec![0.0; 4096],
                 out_r_scratch: vec![0.0; 4096],
@@ -1518,9 +1164,7 @@ pub mod truce_integration {
             state.out_r_scratch.resize(max_blk, 0.0);
         }
 
-        fn latency(state: &Self::DspState) -> u32 {
-            state.core.latency_samples()
-        }
+        fn latency(state: &Self::DspState) -> u32 { state.core.latency_samples() }
 
         fn process(
             state: &mut Self::DspState,
@@ -1653,106 +1297,58 @@ pub mod truce_integration {
 
             ctx.set_meter(P::MeterIn, in_pk);
             ctx.set_meter(P::MeterOutL, out_l_pk);
-            if buffer.num_output_channels() >= 2 {
-                ctx.set_meter(P::MeterOutR, out_r_pk);
-            }
+            if buffer.num_output_channels() >= 2 { ctx.set_meter(P::MeterOutR, out_r_pk); }
 
             ProcessStatus::Normal
         }
 
-        /// Interface identica (134 caracteres nos cabecalhos).
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
-                section(
-                    "GLOBAL & INPUT -----------------------------------------------------------------------------------------------------------------------",
-                    vec![
-                        dropdown(P::Key, "Key").cols(2),
-                        dropdown(P::MidiMode, "MIDI Mode").cols(2),
-                        knob(P::MidiCh, "MIDI Ch"),
-                        knob(P::Tune, "Tune Hz").cols(2),
-                        knob(P::InputGain, "In Gain").cols(2),
-                        toggle(P::LiveMode, "Live"),
-                        meter(&[P::MeterIn], "In"),
-                    ],
-                ),
-                section(
-                    "DIRECT & UNISON ----------------------------------------------------------------------------------------------------------------------",
-                    vec![
-                        toggle(P::DirectOn, "Direct"),
-                        knob(P::DirectLevel, "Dir Lev"),
-                        knob(P::DirectPan, "Dir Pan"),
-                        toggle(P::Link, "Link"),
-                        toggle(P::UnisonOn, "Unison"),
-                        knob(P::UnisonRandom, "U.Rand"),
-                        knob(P::UnisonFormant, "U.Form"),
-                        knob(P::UnisonQuantise, "U.Quant"),
-                        knob(P::UnisonLevel, "U.Level"),
-                        knob(P::UnisonPan, "U.Pan"),
-                        meter(&[P::MeterOutL, P::MeterOutR], "Out"),
-                    ],
-                ),
-                section(
-                    "VOX 1 --------------------------------------------------------------------------------------------------------------------------------",
-                    vec![
-                        toggle(P::H1On, "On"),
-                        toggle(P::H1Dual, "Dual"),
-                        knob(P::H1Scale, "Scale").cols(4),
-                        knob(P::H1Random, "Random"),
-                        knob(P::H1Formant, "Formant"),
-                        knob(P::H1Quantise, "Quantise"),
-                        knob(P::H1Level, "Level"),
-                        knob(P::H1Pan, "Pan"),
-                    ],
-                ),
-                section(
-                    "VOX 2 --------------------------------------------------------------------------------------------------------------------------------",
-                    vec![
-                        toggle(P::H2On, "On"),
-                        toggle(P::H2Dual, "Dual"),
-                        knob(P::H2Scale, "Scale").cols(4),
-                        knob(P::H2Random, "Random"),
-                        knob(P::H2Formant, "Formant"),
-                        knob(P::H2Quantise, "Quantise"),
-                        knob(P::H2Level, "Level"),
-                        knob(P::H2Pan, "Pan"),
-                    ],
-                ),
-                section(
-                    "VOX 3 --------------------------------------------------------------------------------------------------------------------------------",
-                    vec![
-                        toggle(P::H3On, "On"),
-                        toggle(P::H3Dual, "Dual"),
-                        knob(P::H3Scale, "Scale").cols(4),
-                        knob(P::H3Random, "Random"),
-                        knob(P::H3Formant, "Formant"),
-                        knob(P::H3Quantise, "Quantise"),
-                        knob(P::H3Level, "Level"),
-                        knob(P::H3Pan, "Pan"),
-                    ],
-                ),
-                section(
-                    "VOX 4 --------------------------------------------------------------------------------------------------------------------------------",
-                    vec![
-                        toggle(P::H4On, "On"),
-                        toggle(P::H4Dual, "Dual"),
-                        knob(P::H4Scale, "Scale").cols(4),
-                        knob(P::H4Random, "Random"),
-                        knob(P::H4Formant, "Formant"),
-                        knob(P::H4Quantise, "Quantise"),
-                        knob(P::H4Level, "Level"),
-                        knob(P::H4Pan, "Pan"),
-                    ],
-                ),
+                section("GLOBAL & INPUT -----------------------------------------------------------------------------------------------------------------------", vec![
+                    dropdown(P::Key, "Key").cols(2), dropdown(P::MidiMode, "MIDI Mode").cols(2),
+                    knob(P::MidiCh, "MIDI Ch"), knob(P::Tune, "Tune Hz").cols(2),
+                    knob(P::InputGain, "In Gain").cols(2), toggle(P::LiveMode, "Live"),
+                    meter(&[P::MeterIn], "In"),
+                ]),
+                section("DIRECT & UNISON ----------------------------------------------------------------------------------------------------------------------", vec![
+                    toggle(P::DirectOn, "Direct"), knob(P::DirectLevel, "Dir Lev"),
+                    knob(P::DirectPan, "Dir Pan"), toggle(P::Link, "Link"),
+                    toggle(P::UnisonOn, "Unison"), knob(P::UnisonRandom, "U.Rand"),
+                    knob(P::UnisonFormant, "U.Form"), knob(P::UnisonQuantise, "U.Quant"),
+                    knob(P::UnisonLevel, "U.Level"), knob(P::UnisonPan, "U.Pan"),
+                    meter(&[P::MeterOutL, P::MeterOutR], "Out"),
+                ]),
+                section("VOX 1 --------------------------------------------------------------------------------------------------------------------------------", vec![
+                    toggle(P::H1On, "On"), toggle(P::H1Dual, "Dual"),
+                    knob(P::H1Scale, "Scale").cols(4), knob(P::H1Random, "Random"),
+                    knob(P::H1Formant, "Formant"), knob(P::H1Quantise, "Quantise"),
+                    knob(P::H1Level, "Level"), knob(P::H1Pan, "Pan"),
+                ]),
+                section("VOX 2 --------------------------------------------------------------------------------------------------------------------------------", vec![
+                    toggle(P::H2On, "On"), toggle(P::H2Dual, "Dual"),
+                    knob(P::H2Scale, "Scale").cols(4), knob(P::H2Random, "Random"),
+                    knob(P::H2Formant, "Formant"), knob(P::H2Quantise, "Quantise"),
+                    knob(P::H2Level, "Level"), knob(P::H2Pan, "Pan"),
+                ]),
+                section("VOX 3 --------------------------------------------------------------------------------------------------------------------------------", vec![
+                    toggle(P::H3On, "On"), toggle(P::H3Dual, "Dual"),
+                    knob(P::H3Scale, "Scale").cols(4), knob(P::H3Random, "Random"),
+                    knob(P::H3Formant, "Formant"), knob(P::H3Quantise, "Quantise"),
+                    knob(P::H3Level, "Level"), knob(P::H3Pan, "Pan"),
+                ]),
+                section("VOX 4 --------------------------------------------------------------------------------------------------------------------------------", vec![
+                    toggle(P::H4On, "On"), toggle(P::H4Dual, "Dual"),
+                    knob(P::H4Scale, "Scale").cols(4), knob(P::H4Random, "Random"),
+                    knob(P::H4Formant, "Formant"), knob(P::H4Quantise, "Quantise"),
+                    knob(P::H4Level, "Level"), knob(P::H4Pan, "Pan"),
+                ]),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.8")
+            .with_title("CHORUSVOX DECABUDDY v0.2.9")
             .into_editor(&params)
         }
     }
 
-    truce::plugin! {
-        logic: ChorusVox,
-        params: ChorusVoxParams,
-    }
+    truce::plugin! { logic: ChorusVox, params: ChorusVoxParams }
 }
 
 #[cfg(test)]
@@ -1764,38 +1360,28 @@ mod jazz_and_live_tests {
         let mut proc = DecaBuddyProcessor::new(44_100.0);
         proc.params.live_mode = true;
         proc.host_offline = false;
-        assert_eq!(proc.latency_samples(), 0, "Live mode deve reportar 0 amostras para zero-latency monitoring");
-
+        assert_eq!(proc.latency_samples(), 0);
         proc.host_offline = true;
-        assert!(proc.latency_samples() > 2000, "No Bounce offline, deve ativar o lookahead completo com PDC");
+        assert!(proc.latency_samples() > 2000);
     }
 
     #[test]
     fn test_jazz_dmaj7_to_fsharp_m6_with_sustain_pedal() {
         let mut proc = DecaBuddyProcessor::new(44_100.0);
         proc.params.midi_mode = MidiHarmonyMode::FlexiChord;
-        for h in &mut proc.params.harmonies {
-            h.scale = ScaleId::Midi;
-            h.enabled = true;
-        }
-
+        for h in &mut proc.params.harmonies { h.scale = ScaleId::Midi; h.enabled = true; }
         proc.handle_midi_event(0xB0, 64, 127);
-
         for &n in &[62u8, 66, 69, 73] {
             proc.handle_midi_event(0x90, n, 100);
             proc.handle_midi_event(0x80, n, 0);
         }
-        assert_eq!(proc.chord_notes_len, 4, "Pedal de sustain deve reter as 4 notas do Dmaj7");
-
+        assert_eq!(proc.chord_notes_len, 4);
         for v in 0..4 {
-            let shift = proc.flexichord_jazz_shift(v, 62).expect("Deve gerar intervalo para Dmaj7");
-            assert!(shift.abs() >= 2, "Anti-clash deve impedir intervalo de 1 semitom: shift={}", shift);
+            let shift = proc.flexichord_jazz_shift(v, 62).unwrap();
+            assert!(shift.abs() >= 2);
         }
-
-        for &n in &[66u8, 69, 73, 75] {
-            proc.handle_midi_event(0x90, n, 100);
-        }
+        for &n in &[66u8, 69, 73, 75] { proc.handle_midi_event(0x90, n, 100); }
         proc.handle_midi_event(0xB0, 64, 0);
-        assert_eq!(proc.chord_notes_len, 4, "F#m6 fisicamente seguro permanece ativo com 4 notas");
+        assert_eq!(proc.chord_notes_len, 4);
     }
 }

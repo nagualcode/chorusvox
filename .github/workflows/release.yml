@@ -13,32 +13,26 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: Install Truce CLI
         run: cargo install truce-cli
-
       - name: Build and Install Bundles (VST3 & AUv2 for macOS)
         run: cargo truce install --vst3 --au2
-
       - name: Package macOS AU & VST3 Artifacts
         run: |
           cd ~/Library/Audio/Plug-Ins
           zip -r -y ${{ github.workspace }}/ChorusVox-DecaBuddy-macOS-AU-VST3.zip \
             "VST3/ChorusVox DecaBuddy.vst3" \
             "Components/ChorusVox DecaBuddy.component"
-
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: "ChorusVox DecaBuddy ${{ github.ref_name }} (macOS AU & VST3)"
           body: |
             ### ChorusVox DecaBuddy ${{ github.ref_name }} — macOS Release 🍎🎙️
-            
-            **Plataforma suportada:** macOS (Apple Silicon / Universal)
-            **Formatos incluídos neste pacote (`.zip`):**
+            **Supported Platform:** macOS (Apple Silicon & Intel Universal)
+            **Included Formats (`.zip`):**
             - **AU (Audio Unit v2):** `ChorusVox DecaBuddy.component` (`~/Library/Audio/Plug-Ins/Components/`)
             - **VST3:** `ChorusVox DecaBuddy.vst3` (`~/Library/Audio/Plug-Ins/VST3/`)
           files: ChorusVox-DecaBuddy-macOS-AU-VST3.zip
