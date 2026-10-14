@@ -6,9 +6,8 @@ pub mod scales;
 use dsp::{
     gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr, lookahead_samples_for_sr,
     max_grain_for_sr, out_delay_for_sr, pan50_to_gains, soft_saturate, voice_db_to_lin,
-    AsyncYinWorker, BiquadLowpass, HarmonyChannelDsp, InputTransformerStage, LpcFormantMorpher,
-    Njm4558StereoCrosstalk, OversampledAnalogStage, PitchTracker, PowerSupply9VSag,
-    PsolaSubVoice, ScopedFtzDaz, SibilanceDetector, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
+    BiquadLowpass, ChoirAnalogBus, HarmonyChannelDsp, PitchTracker, PsolaSubVoice,
+    ScopedFtzDaz, SibilanceDetector, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -148,7 +147,6 @@ struct VoiceSlewState { gain_smooth: f32, gl_smooth: f32, gr_smooth: f32, was_ac
 pub struct DecaBuddyProcessor {
     pub sample_rate: f32,
     pub host_offline: bool,
-    pub use_async_yin: bool,
     pub params: DecaBuddyParams,
     pub preset_slots: [DecaBuddyParams; 4],
     pub scale_bank: ScaleBank,
@@ -162,18 +160,11 @@ pub struct DecaBuddyProcessor {
     write_pos: usize,
     hop_counter: usize,
 
-    transformer_stage: InputTransformerStage,
-    analog_oversampler: OversampledAnalogStage,
-    psu_sag: PowerSupply9VSag,
-    opamp_crosstalk: Njm4558StereoCrosstalk,
-    lpc_morpher: LpcFormantMorpher,
+    choir_bus: ChoirAnalogBus,
     sibilance_det: SibilanceDetector,
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
-    async_yin: AsyncYinWorker,
 
-    pcm3003_recon_l: BiquadLowpass,
-    pcm3003_recon_r: BiquadLowpass,
     nju7032_env: f32,
     prev_live_low_lat: bool,
 
@@ -209,27 +200,16 @@ pub struct DecaBuddyProcessor {
     uni_gain_smooth: f32, uni_gl_smooth: f32, uni_gr_smooth: f32,
     uni_was_active: bool,
     master_gain_smooth: f32,
-    bus_energy_smooth: f32,
 }
 
 impl DecaBuddyProcessor {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(8000.0);
-        let mut xfmr = InputTransformerStage::default();
-        xfmr.set_sample_rate(sr);
-        let mut analog_os = OversampledAnalogStage::default();
-        analog_os.set_sample_rate(sr);
-        let mut psu = PowerSupply9VSag::default();
-        psu.set_sample_rate(sr);
+        let mut choir_bus = ChoirAnalogBus::default();
+        choir_bus.set_sample_rate(sr);
         let mut lp = BiquadLowpass::default();
         lp.set_cutoff(310.96, sr);
         let pitch = PitchTracker::new(sr);
-        let async_yin = AsyncYinWorker::new(sr);
-
-        let mut recon_l = BiquadLowpass::default();
-        let mut recon_r = BiquadLowpass::default();
-        recon_l.set_cutoff(PCM3003_RECON_LP_HZ, sr);
-        recon_r.set_cutoff(PCM3003_RECON_LP_HZ, sr);
 
         let max_grain = max_grain_for_sr(sr);
         let lookahead = lookahead_samples_for_sr(sr);
@@ -237,7 +217,7 @@ impl DecaBuddyProcessor {
         let live_lookahead = live_lookahead_for_sr(sr);
         let live_out_delay = live_out_delay_for_sr(sr);
         let min_t0 = ((20.0 * (sr / 44_100.0)).round() as usize).max(2);
-        let max_t0 = ((980.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, 1020);
+        let max_t0 = ((1050.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, 4096);
 
         let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
@@ -245,7 +225,6 @@ impl DecaBuddyProcessor {
         Self {
             sample_rate: sr,
             host_offline: false,
-            use_async_yin: false,
             params: default_params.clone(),
             preset_slots: [default_params.clone(), default_params.clone(), default_params.clone(), default_params],
             scale_bank: ScaleBank::default(),
@@ -257,17 +236,10 @@ impl DecaBuddyProcessor {
             sib_ring: vec![0.0; RING_SIZE],
             write_pos: init_write,
             hop_counter: 0,
-            transformer_stage: xfmr,
-            analog_oversampler: analog_os,
-            psu_sag: psu,
-            opamp_crosstalk: Njm4558StereoCrosstalk::default(),
-            lpc_morpher: LpcFormantMorpher::default(),
+            choir_bus,
             sibilance_det: SibilanceDetector::default(),
             lp_filter: lp,
             pitch,
-            async_yin,
-            pcm3003_recon_l: recon_l,
-            pcm3003_recon_r: recon_r,
             nju7032_env: 0.0,
             prev_live_low_lat: true,
             latest_mark: init_write.wrapping_sub(lookahead),
@@ -286,7 +258,7 @@ impl DecaBuddyProcessor {
             max_grain, lookahead, out_delay, live_lookahead, live_out_delay, min_t0, max_t0,
             dir_gain_smooth: 1.0, dir_gl_smooth: 0.707, dir_gr_smooth: 0.707,
             uni_gain_smooth: 0.0, uni_gl_smooth: 0.707, uni_gr_smooth: 0.707,
-            uni_was_active: false, master_gain_smooth: 1.0, bus_energy_smooth: 0.0,
+            uni_was_active: false, master_gain_smooth: 1.0,
         }
     }
 
@@ -299,12 +271,8 @@ impl DecaBuddyProcessor {
 
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(8000.0);
-        self.transformer_stage.set_sample_rate(self.sample_rate);
-        self.analog_oversampler.set_sample_rate(self.sample_rate);
-        self.psu_sag.set_sample_rate(self.sample_rate);
+        self.choir_bus.set_sample_rate(self.sample_rate);
         self.lp_filter.set_cutoff(310.96, self.sample_rate);
-        self.pcm3003_recon_l.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
-        self.pcm3003_recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
         self.pitch.set_sample_rate(self.sample_rate);
 
         self.max_grain = max_grain_for_sr(self.sample_rate);
@@ -313,7 +281,7 @@ impl DecaBuddyProcessor {
         self.live_lookahead = live_lookahead_for_sr(self.sample_rate);
         self.live_out_delay = live_out_delay_for_sr(self.sample_rate);
         self.min_t0 = ((20.0 * (self.sample_rate / 44_100.0)).round() as usize).max(2);
-        self.max_t0 = ((980.0 * (self.sample_rate / 44_100.0)).round() as usize).clamp(self.min_t0 + 1, 1020);
+        self.max_t0 = ((1050.0 * (self.sample_rate / 44_100.0)).round() as usize).clamp(self.min_t0 + 1, 4096);
 
         self.reset();
     }
@@ -323,15 +291,9 @@ impl DecaBuddyProcessor {
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
         self.sib_ring.fill(0.0);
-        self.transformer_stage.reset();
-        self.analog_oversampler.reset();
-        self.psu_sag.reset();
-        self.opamp_crosstalk.reset();
-        self.lpc_morpher.reset();
+        self.choir_bus.reset();
         self.sibilance_det.reset();
         self.pitch.reset();
-        self.pcm3003_recon_l.reset();
-        self.pcm3003_recon_r.reset();
         self.nju7032_env = 0.0;
         self.write_pos = self.lookahead * 2 + self.out_delay;
         self.latest_mark = self.write_pos.wrapping_sub(self.lookahead);
@@ -354,7 +316,6 @@ impl DecaBuddyProcessor {
         self.uni_gain_smooth = 0.0; self.uni_gl_smooth = 0.707; self.uni_gr_smooth = 0.707;
         self.uni_was_active = false;
         self.master_gain_smooth = 1.0;
-        self.bus_energy_smooth = 0.0;
     }
 
     pub fn save_preset_slot(&mut self, slot: usize) {
@@ -684,7 +645,7 @@ impl DecaBuddyProcessor {
             dual_formant_ratio: 1.0, rand_norm: 0.0, base_delay_ms: 0.0,
         }; 4];
 
-        let mut num_active_voices = 0usize;
+        let mut num_active_voices = if self.params.unison.enabled { 1usize } else { 0usize };
         for v_idx in 0..4 {
             let mut vp = self.params.harmonies[v_idx];
             if self.params.link && v_idx > 0 {
@@ -707,12 +668,9 @@ impl DecaBuddyProcessor {
             };
         }
 
-        let async_mode = self.use_async_yin && !self.host_offline;
-
         for i in 0..n {
-            let rail_limit = self.psu_sag.step_rail(self.bus_energy_smooth, num_active_voices);
-            let xfmr_x = self.transformer_stage.process(input_mono[i] * in_gain);
-            let x = self.analog_oversampler.process_with_rail(xfmr_x, rail_limit);
+            // Entrada limpa e transparente (resposta plana 20 Hz - 20 kHz para o Direct e YIN)
+            let x = input_mono[i] * in_gain;
 
             let abs_x = x.abs();
             if abs_x > self.nju7032_env {
@@ -727,66 +685,53 @@ impl DecaBuddyProcessor {
             self.lp_ring[w_idx] = lp_x;
             let sib = self.sibilance_det.step(x, lp_x);
             self.sib_ring[w_idx] = sib;
-            self.lpc_morpher.track_sample(x);
 
+            // Time-Slicing sincrono deterministico do YIN
             let was_voiced = self.pitch.voiced;
-            let frame_done = if async_mode {
-                self.async_yin.push_sample(self.write_pos, x);
-                self.hop_counter += 1;
-                if self.hop_counter >= yin_hop {
-                    self.hop_counter = 0;
-                    self.async_yin.trigger_job(self.write_pos, self.sample_rate, self.params.tune_hz);
-                }
-                self.async_yin.poll_result(&mut self.pitch)
-            } else {
-                if self.hop_counter == 0 {
-                    self.pitch.begin_sliced_frame(&self.dry_ring, self.write_pos, self.sample_rate);
-                }
-                self.hop_counter += 1;
-                if self.hop_counter >= yin_hop {
-                    self.hop_counter = 0;
-                }
-                self.pitch.step_time_slice(self.sample_rate, self.params.tune_hz)
-            };
+            if self.hop_counter == 0 {
+                self.pitch.begin_sliced_frame(&self.dry_ring, self.write_pos, self.sample_rate);
+            }
+            self.hop_counter += 1;
+            if self.hop_counter >= yin_hop {
+                self.hop_counter = 0;
+            }
 
-            if frame_done {
-                self.lpc_morpher.update_coefficients();
-                if self.pitch.voiced {
-                    let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
-                    self.lp_filter.set_cutoff(cutoff, self.sample_rate);
+            let frame_done = self.pitch.step_time_slice(self.sample_rate, self.params.tune_hz);
+            if frame_done && self.pitch.voiced {
+                let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
+                self.lp_filter.set_cutoff(cutoff, self.sample_rate);
 
-                    let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
-                    let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
-                    self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
+                let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
+                let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
+                self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
 
-                    for v_idx in 0..4 {
-                        let mut vp = self.params.harmonies[v_idx];
-                        if self.params.link && v_idx > 0 {
-                            let h0 = self.params.harmonies[0];
-                            vp.random = h0.random; vp.formant = h0.formant; vp.quantise = h0.quantise;
-                        }
-                        self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
-                        self.cached_pitch_ratio[v_idx] = if let Some(shift) =
-                            self.compute_voice_shift_semitones(v_idx, &vp)
-                        {
-                            2.0_f32.powf(shift / 12.0)
-                        } else { 1.0 };
+                for v_idx in 0..4 {
+                    let mut vp = self.params.harmonies[v_idx];
+                    if self.params.link && v_idx > 0 {
+                        let h0 = self.params.harmonies[0];
+                        vp.random = h0.random; vp.formant = h0.formant; vp.quantise = h0.quantise;
                     }
+                    self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
+                    self.cached_pitch_ratio[v_idx] = if let Some(shift) =
+                        self.compute_voice_shift_semitones(v_idx, &vp)
+                    {
+                        2.0_f32.powf(shift / 12.0)
+                    } else { 1.0 };
+                }
 
-                    if !was_voiced {
-                        let t0 = (self.sample_rate / self.pitch.current_f0)
-                            .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
-                        let r = (t0 / 2).max(2);
-                        let center = self.write_pos.wrapping_sub(active_lookahead);
-                        let mut best_p = center;
-                        let mut best_v = -1e9_f32;
-                        for k in 0..(2 * r + 1) {
-                            let p = center.wrapping_sub(r).wrapping_add(k);
-                            let v = self.lp_ring[p & RING_MASK];
-                            if v > best_v { best_v = v; best_p = p; }
-                        }
-                        self.latest_mark = best_p;
+                if !was_voiced {
+                    let t0 = (self.sample_rate / self.pitch.current_f0)
+                        .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
+                    let r = (t0 / 2).max(2);
+                    let center = self.write_pos.wrapping_sub(active_lookahead);
+                    let mut best_p = center;
+                    let mut best_v = -1e9_f32;
+                    for k in 0..(2 * r + 1) {
+                        let p = center.wrapping_sub(r).wrapping_add(k);
+                        let v = self.lp_ring[p & RING_MASK];
+                        if v > best_v { best_v = v; best_p = p; }
                     }
+                    self.latest_mark = best_p;
                 }
             }
 
@@ -798,8 +743,6 @@ impl DecaBuddyProcessor {
             let emit_pos = read_pos.wrapping_sub(active_out_delay);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
             let emit_sib = self.sib_ring[emit_pos & RING_MASK];
-            let lpc_a1 = self.lpc_morpher.a1;
-            let lpc_a2 = self.lpc_morpher.a2;
 
             let dry_signal = if live_low_lat { x } else { self.dry_ring[emit_pos & RING_MASK] };
 
@@ -815,21 +758,26 @@ impl DecaBuddyProcessor {
 
             self.master_gain_smooth = 0.995 * self.master_gain_smooth + 0.005 * target_master_gain;
 
-            let mut mix_l = dry_signal * (self.dir_gain_smooth * self.dir_gl_smooth);
-            let mut mix_r = dry_signal * (self.dir_gain_smooth * self.dir_gr_smooth);
+            // Sinal Direct 100% puro e transparente
+            let dir_l = dry_signal * (self.dir_gain_smooth * self.dir_gl_smooth);
+            let dir_r = dry_signal * (self.dir_gain_smooth * self.dir_gr_smooth);
+
+            // Barramento exclusivo das harmonias (Wet Choir Bus)
+            let mut choir_l = 0.0_f32;
+            let mut choir_r = 0.0_f32;
 
             let uni_active = target_uni_gain > 0.0 || self.uni_gain_smooth > 1e-4;
             if uni_active {
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample_with_cache(
-                    &self.dry_ring, &self.hann_lut, None, emit_sib, lpc_a1, lpc_a2,
+                    &self.dry_ring, &self.hann_lut, None, emit_sib,
                     self.write_pos, read_pos, emit_pos, self.latest_mark,
                     self.voiced_env, emit_mask, self.pitch.current_f0,
                     self.cached_uni_ratio, uni_formant_ratio, uni_rand_norm,
                     0.0, 11.0 * uni_rand_norm, 0.35, self.sample_rate, self.max_grain,
                 );
-                mix_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
-                mix_r += y_u * (self.uni_gain_smooth * self.uni_gr_smooth);
+                choir_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
+                choir_r += y_u * (self.uni_gain_smooth * self.uni_gr_smooth);
             } else if self.uni_was_active {
                 self.unison_dsp.reset();
                 self.uni_was_active = false;
@@ -864,7 +812,7 @@ impl DecaBuddyProcessor {
                 let y_main = ch_dsp.main.step_sample_with_cache(
                     &self.dry_ring, &self.hann_lut,
                     if pv.dual { Some(&mut ch_dsp.shared_grain) } else { None },
-                    emit_sib, lpc_a1, lpc_a2,
+                    emit_sib,
                     self.write_pos, read_pos, emit_pos, self.latest_mark,
                     self.voiced_env, emit_mask, self.pitch.current_f0,
                     pitch_ratio, formant_ratio, pv.rand_norm,
@@ -875,27 +823,30 @@ impl DecaBuddyProcessor {
                     let y_dual = ch_dsp.dual.step_sample_with_cache(
                         &self.dry_ring, &self.hann_lut,
                         Some(&mut ch_dsp.shared_grain),
-                        emit_sib, lpc_a1, lpc_a2,
+                        emit_sib,
                         self.write_pos, read_pos, emit_pos, self.latest_mark,
                         self.voiced_env, emit_mask, self.pitch.current_f0,
                         pitch_ratio, pv.dual_formant_ratio, pv.rand_norm,
                         -9.0, pv.base_delay_ms + 14.0, 0.0, self.sample_rate, self.max_grain,
                     );
-                    mix_l += (y_main * s.gl_smooth + y_dual * pv.d_gl) * s.gain_smooth;
-                    mix_r += (y_main * s.gr_smooth + y_dual * pv.d_gr) * s.gain_smooth;
+                    choir_l += (y_main * s.gl_smooth + y_dual * pv.d_gl) * s.gain_smooth;
+                    choir_r += (y_main * s.gr_smooth + y_dual * pv.d_gr) * s.gain_smooth;
                 } else {
-                    mix_l += y_main * (s.gain_smooth * s.gl_smooth);
-                    mix_r += y_main * (s.gain_smooth * s.gr_smooth);
+                    choir_l += y_main * (s.gain_smooth * s.gl_smooth);
+                    choir_r += y_main * (s.gain_smooth * s.gr_smooth);
                 }
             }
 
-            let recon_l = self.pcm3003_recon_l.process(mix_l * self.master_gain_smooth);
-            let recon_r = self.pcm3003_recon_r.process(mix_r * self.master_gain_smooth);
-            let (xt_l, xt_r) = self.opamp_crosstalk.process_stereo(recon_l, recon_r);
-            out_l[i] = soft_saturate(xt_l);
-            out_r[i] = soft_saturate(xt_r);
+            // Aplica a modelagem analogica HV10 / Ariwa exclusivamente no Choir Bus
+            let (analog_choir_l, analog_choir_r) = if num_active_voices > 0 {
+                self.choir_bus.process_stereo(choir_l, choir_r, num_active_voices)
+            } else {
+                (0.0, 0.0)
+            };
 
-            self.bus_energy_smooth = 0.995 * self.bus_energy_smooth + 0.005 * (out_l[i].abs() + out_r[i].abs());
+            out_l[i] = soft_saturate((dir_l + analog_choir_l) * self.master_gain_smooth);
+            out_r[i] = soft_saturate((dir_r + analog_choir_r) * self.master_gain_smooth);
+
             self.write_pos = self.write_pos.wrapping_add(1);
         }
 
@@ -1134,10 +1085,8 @@ pub mod truce_integration {
 
     impl Default for ChorusVoxDsp {
         fn default() -> Self {
-            let mut core = DecaBuddyProcessor::new(44_100.0);
-            core.use_async_yin = true;
             Self {
-                core,
+                core: DecaBuddyProcessor::new(44_100.0),
                 mono_scratch: vec![0.0; 4096],
                 out_l_scratch: vec![0.0; 4096],
                 out_r_scratch: vec![0.0; 4096],
@@ -1343,7 +1292,7 @@ pub mod truce_integration {
                     knob(P::H4Level, "Level"), knob(P::H4Pan, "Pan"),
                 ]),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.9")
+            .with_title("CHORUSVOX DECABUDDY v0.2.10")
             .into_editor(&params)
         }
     }

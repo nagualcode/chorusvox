@@ -1,9 +1,11 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag version to release (e.g. v0.2.9)"
+        required: true
 
 permissions:
   contents: write
@@ -28,13 +30,8 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "ChorusVox DecaBuddy ${{ github.ref_name }} (macOS AU & VST3)"
-          body: |
-            ### ChorusVox DecaBuddy ${{ github.ref_name }} — macOS Release 🍎🎙️
-            **Supported Platform:** macOS (Apple Silicon & Intel Universal)
-            **Included Formats (`.zip`):**
-            - **AU (Audio Unit v2):** `ChorusVox DecaBuddy.component` (`~/Library/Audio/Plug-Ins/Components/`)
-            - **VST3:** `ChorusVox DecaBuddy.vst3` (`~/Library/Audio/Plug-Ins/VST3/`)
+          tag_name: ${{ github.event.inputs.tag }}
+          name: "ChorusVox DecaBuddy ${{ github.event.inputs.tag }} (macOS AU & VST3)"
           files: ChorusVox-DecaBuddy-macOS-AU-VST3.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
