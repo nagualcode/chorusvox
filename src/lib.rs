@@ -4,10 +4,11 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    akai_clean_warmth, gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr,
-    lookahead_samples_for_sr, max_grain_for_sr, out_delay_for_sr, pan50_to_gains,
-    soft_saturate, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp, PitchTracker,
-    PsolaSubVoice, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
+    gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr, lookahead_samples_for_sr,
+    max_grain_for_sr, out_delay_for_sr, pan50_to_gains, soft_saturate, voice_db_to_lin,
+    AkaiInputImpedanceFilter, BiquadLowpass, HarmonyChannelDsp, OversampledAnalogStage,
+    PitchTracker, PsolaSubVoice, ScopedFtzDaz, SibilanceDetector, PCM3003_RECON_LP_HZ,
+    RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -304,9 +305,14 @@ pub struct DecaBuddyProcessor {
     dry_ring: Vec<f32>,
     lp_ring: Vec<f32>,
     mask_ring: Vec<f32>,
+    sib_ring: Vec<f32>,
     write_pos: usize,
     hop_counter: usize,
 
+    // Estagios fisicos modelados do Manual de Servico Akai HV10
+    impedance_filter: AkaiInputImpedanceFilter,
+    analog_oversampler: OversampledAnalogStage,
+    sibilance_det: SibilanceDetector,
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
 
@@ -356,6 +362,10 @@ pub struct DecaBuddyProcessor {
 impl DecaBuddyProcessor {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(8000.0);
+        let mut imp = AkaiInputImpedanceFilter::default();
+        imp.set_sample_rate(sr);
+        let mut analog_os = OversampledAnalogStage::default();
+        analog_os.set_sample_rate(sr);
         let mut lp = BiquadLowpass::default();
         lp.set_cutoff(310.96, sr);
         let pitch = PitchTracker::new(sr);
@@ -371,7 +381,7 @@ impl DecaBuddyProcessor {
         let live_lookahead = live_lookahead_for_sr(sr);
         let live_out_delay = live_out_delay_for_sr(sr);
         let min_t0 = ((20.0 * (sr / 44_100.0)).round() as usize).max(2);
-        let max_t0 = ((980.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
+        let max_t0 = ((980.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, 1020);
 
         let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
@@ -392,8 +402,12 @@ impl DecaBuddyProcessor {
             dry_ring: vec![0.0; RING_SIZE],
             lp_ring: vec![0.0; RING_SIZE],
             mask_ring: vec![0.0; RING_SIZE],
+            sib_ring: vec![0.0; RING_SIZE],
             write_pos: init_write,
             hop_counter: 0,
+            impedance_filter: imp,
+            analog_oversampler: analog_os,
+            sibilance_det: SibilanceDetector::default(),
             lp_filter: lp,
             pitch,
             pcm3003_recon_l: recon_l,
@@ -454,6 +468,8 @@ impl DecaBuddyProcessor {
 
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(8000.0);
+        self.impedance_filter.set_sample_rate(self.sample_rate);
+        self.analog_oversampler.set_sample_rate(self.sample_rate);
         self.lp_filter.set_cutoff(310.96, self.sample_rate);
         self.pcm3003_recon_l.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
         self.pcm3003_recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
@@ -466,7 +482,7 @@ impl DecaBuddyProcessor {
         self.live_out_delay = live_out_delay_for_sr(self.sample_rate);
         self.min_t0 = ((20.0 * (self.sample_rate / 44_100.0)).round() as usize).max(2);
         self.max_t0 = ((980.0 * (self.sample_rate / 44_100.0)).round() as usize)
-            .clamp(self.min_t0 + 1, self.max_grain / 2);
+            .clamp(self.min_t0 + 1, 1020);
 
         self.reset();
     }
@@ -475,6 +491,10 @@ impl DecaBuddyProcessor {
         self.dry_ring.fill(0.0);
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
+        self.sib_ring.fill(0.0);
+        self.impedance_filter.reset();
+        self.analog_oversampler.reset();
+        self.sibilance_det.reset();
         self.pitch.reset();
         self.pcm3003_recon_l.reset();
         self.pcm3003_recon_r.reset();
@@ -820,6 +840,9 @@ impl DecaBuddyProcessor {
         if n == 0 {
             return;
         }
+        // Ativa FTZ/DAZ nativo na CPU uma unica vez para todo o bloco
+        let _ftz_daz_guard = ScopedFtzDaz::new();
+
         self.refresh_midi_targets();
 
         let in_gain = gain_db_to_lin(self.params.input_gain_db);
@@ -923,8 +946,9 @@ impl DecaBuddyProcessor {
         }
 
         for i in 0..n {
-            // Saturacao analogica 100% simetrica (zero DC offset nos graos PSOLA)
-            let x = akai_clean_warmth(input_mono[i] * in_gain);
+            // 1. Curva de impedancia XLR (4k) / Line (33k) + Oversampling Polifasico 2x (2SC3330 + NJM4558L + 5Hz DC Blocker)
+            let imp_x = self.impedance_filter.process(input_mono[i] * in_gain);
+            let x = self.analog_oversampler.process(imp_x);
 
             let abs_x = x.abs();
             if abs_x > self.nju7032_env {
@@ -937,60 +961,62 @@ impl DecaBuddyProcessor {
             self.dry_ring[w_idx] = x;
             let lp_x = self.lp_filter.process(x);
             self.lp_ring[w_idx] = lp_x;
+            let sib = self.sibilance_det.step(x, lp_x);
+            self.sib_ring[w_idx] = sib;
 
+            // 2. Time-Slicing do YIN: captura o frame no inicio do hop e processa uma fatia por amostra
+            let was_voiced = self.pitch.voiced;
+            if self.hop_counter == 0 {
+                self.pitch.begin_sliced_frame(&self.dry_ring, self.write_pos, self.sample_rate);
+            }
             self.hop_counter += 1;
             if self.hop_counter >= yin_hop {
                 self.hop_counter = 0;
-                let was_voiced = self.pitch.voiced;
-                self.pitch.analyze_frame(
-                    &self.dry_ring,
-                    self.write_pos,
-                    self.sample_rate,
-                    self.params.tune_hz,
-                );
-                if self.pitch.voiced {
-                    let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
-                    self.lp_filter.set_cutoff(cutoff, self.sample_rate);
+            }
 
-                    let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
-                    let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
-                    self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
+            let frame_done = self.pitch.step_time_slice(self.sample_rate, self.params.tune_hz);
+            if frame_done && self.pitch.voiced {
+                let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
+                self.lp_filter.set_cutoff(cutoff, self.sample_rate);
 
-                    for v_idx in 0..4 {
-                        let mut vp = self.params.harmonies[v_idx];
-                        if self.params.link && v_idx > 0 {
-                            let h0 = self.params.harmonies[0];
-                            vp.random = h0.random;
-                            vp.formant = h0.formant;
-                            vp.quantise = h0.quantise;
-                        }
-                        self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
-                        self.cached_pitch_ratio[v_idx] = if let Some(shift) =
-                            self.compute_voice_shift_semitones(v_idx, &vp)
-                        {
-                            2.0_f32.powf(shift / 12.0)
-                        } else {
-                            1.0
-                        };
+                let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
+                let dev = self.pitch.current_midi - (self.pitch.current_note as f32);
+                self.cached_uni_ratio = 2.0_f32.powf((-uni_q_norm * dev) / 12.0);
+
+                for v_idx in 0..4 {
+                    let mut vp = self.params.harmonies[v_idx];
+                    if self.params.link && v_idx > 0 {
+                        let h0 = self.params.harmonies[0];
+                        vp.random = h0.random;
+                        vp.formant = h0.formant;
+                        vp.quantise = h0.quantise;
                     }
+                    self.cached_formant_ratio[v_idx] = 2.0_f32.powf((vp.formant * 0.09) / 12.0);
+                    self.cached_pitch_ratio[v_idx] = if let Some(shift) =
+                        self.compute_voice_shift_semitones(v_idx, &vp)
+                    {
+                        2.0_f32.powf(shift / 12.0)
+                    } else {
+                        1.0
+                    };
+                }
 
-                    if !was_voiced {
-                        let t0 = (self.sample_rate / self.pitch.current_f0)
-                            .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
-                        let r = (t0 / 2).max(2);
-                        let center = self.write_pos.wrapping_sub(active_lookahead);
-                        let mut best_p = center;
-                        let mut best_v = -1e9_f32;
-                        for k in 0..(2 * r + 1) {
-                            let p = center.wrapping_sub(r).wrapping_add(k);
-                            let v = self.lp_ring[p & RING_MASK];
-                            if v > best_v {
-                                best_v = v;
-                                best_p = p;
-                            }
+                if !was_voiced {
+                    let t0 = (self.sample_rate / self.pitch.current_f0)
+                        .clamp(self.min_t0 as f32, self.max_t0 as f32) as usize;
+                    let r = (t0 / 2).max(2);
+                    let center = self.write_pos.wrapping_sub(active_lookahead);
+                    let mut best_p = center;
+                    let mut best_v = -1e9_f32;
+                    for k in 0..(2 * r + 1) {
+                        let p = center.wrapping_sub(r).wrapping_add(k);
+                        let v = self.lp_ring[p & RING_MASK];
+                        if v > best_v {
+                            best_v = v;
+                            best_p = p;
                         }
-                        self.latest_mark = best_p;
                     }
+                    self.latest_mark = best_p;
                 }
             }
 
@@ -1001,6 +1027,7 @@ impl DecaBuddyProcessor {
             self.mask_ring[read_pos & RING_MASK] = self.voiced_env;
             let emit_pos = read_pos.wrapping_sub(active_out_delay);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
+            let emit_sib = self.sib_ring[emit_pos & RING_MASK];
 
             let dry_signal = if live_low_lat { x } else { self.dry_ring[emit_pos & RING_MASK] };
 
@@ -1022,9 +1049,11 @@ impl DecaBuddyProcessor {
             let uni_active = target_uni_gain > 0.0 || self.uni_gain_smooth > 1e-4;
             if uni_active {
                 self.uni_was_active = true;
-                let y_u = self.unison_dsp.step_sample(
+                let y_u = self.unison_dsp.step_sample_with_cache(
                     &self.dry_ring,
                     &self.hann_lut,
+                    None,
+                    emit_sib,
                     self.write_pos,
                     read_pos,
                     emit_pos,
@@ -1075,9 +1104,13 @@ impl DecaBuddyProcessor {
                 let pitch_ratio = self.cached_pitch_ratio[v_idx];
                 let formant_ratio = self.cached_formant_ratio[v_idx];
 
-                let y_main = self.harmony_dsp[v_idx].main.step_sample(
+                // Extracao compartilhada de grao entre Main e Dual quando Dual esta ativo
+                let ch_dsp = &mut self.harmony_dsp[v_idx];
+                let y_main = ch_dsp.main.step_sample_with_cache(
                     &self.dry_ring,
                     &self.hann_lut,
+                    if pv.dual { Some(&mut ch_dsp.shared_grain) } else { None },
+                    emit_sib,
                     self.write_pos,
                     read_pos,
                     emit_pos,
@@ -1096,9 +1129,11 @@ impl DecaBuddyProcessor {
                 );
 
                 if pv.dual {
-                    let y_dual = self.harmony_dsp[v_idx].dual.step_sample(
+                    let y_dual = ch_dsp.dual.step_sample_with_cache(
                         &self.dry_ring,
                         &self.hann_lut,
+                        Some(&mut ch_dsp.shared_grain),
+                        emit_sib,
                         self.write_pos,
                         read_pos,
                         emit_pos,
@@ -1625,7 +1660,7 @@ pub mod truce_integration {
             ProcessStatus::Normal
         }
 
-        /// Cabecalhos de 134 caracteres para alinhar o inicio de 'VOX 1..4' na margem esquerda.
+        /// Interface identica (134 caracteres nos cabecalhos).
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
                 section(
@@ -1709,7 +1744,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.7")
+            .with_title("CHORUSVOX DECABUDDY v0.2.8")
             .into_editor(&params)
         }
     }
