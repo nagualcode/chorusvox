@@ -49,9 +49,12 @@ Controls root key, incoming MIDI chord parsing, master concert pitch, input tran
 | **MIDI Mode** | `Auto Ch`, `Mono (1-4)`, `Wait All`, `Priority`, `FlexiChd` | Selects the MIDI voice-allocation algorithm for any harmony voice whose **Scale** knob is set to **`MIDI`**. |
 | **MIDI Ch** | `1` to `16` | Sets the base MIDI channel. In `Mono (1-4)` mode, voices 1 to 4 listen consecutively on `MIDI Ch` through `MIDI Ch + 3`. |
 | **Tune Hz** | `427 Hz` to `453 Hz` *(Default: `440 Hz`)* | Calibrates master concert A4 reference frequency for the YIN pitch tracker. |
-| **In Gain** | `-15.0 dB` to `+15.0 dB` *(Default: `0.0 dB`)* | Adjusts input drive into the modeled input transformer and discrete `2SC3330` transistor stage. Pushing above `0 dB` increases warm 2nd-harmonic saturation. |
-| **Live** | `On` / `Off` *(Default: `On`)* | **Live Mode (`On`):** The **Direct** lead vocal passes with **0 ms latency** through the modeled analog path while harmonies use a short causal window (~5.8 ms) for real-time monitoring. **Studio Mode (`Off`):** Engages full lookahead with host Plugin Delay Compensation (PDC). *Note: During offline DAW Bounce/Export, Studio Mode is engaged automatically.* |
+| **In Gain** | `-15.0 dB` to `+15.0 dB` *(Default: `0.0 dB`)* | Adjusts input drive into the discrete input buffer stage. Pushing above `0 dB` increases warm 2nd-harmonic saturation. |
+| **Drive** | `0.0%` to `100.0%` *(Default: `35.0%`)* | Controls analog warmth and drive in the **ChoirAnalogBus** (Ariwa 185 Hz console warmth shelf, JRC NJM4558L symmetric rail saturation, 9V DC dynamic power supply sag, and stereo crosstalk). Applied exclusively to synthesized choir voices. |
 | **In** *(Meter)* | Vertical Bar | Ballistic input peak meter modeled after the `NJU7032D` (IC401) detector circuit and the 3 front-panel LEDs (`-12 dB`, `-6 dB`, `0 dB/Over`). |
+
+> [!NOTE]
+> **Automatic Live vs. Offline PDC Latency:** In real-time tracking, ChorusVox operates in **Live Mode** with **0 ms reported latency** to the DAW and **0 ms delay on the Direct path**. During offline DAW bounce/export (`is_offline`), full lookahead with 2496 samples of Plugin Delay Compensation (PDC) is engaged automatically.
 
 #### Detailed MIDI Modes (`MIDI Mode`)
 
@@ -79,7 +82,7 @@ Controls the lead vocal path, the 10th unison doubling voice, parameter linking,
 | **Dir Pan** | `-50` (L) to `+50` (R) | Constant-power stereo pan position for the direct signal. |
 | **Link** | `On` / `Off` | Mirrors `VOX 1` **Random**, **Formant**, and **Quantise** settings across `VOX 2`, `VOX 3`, and `VOX 4` while preserving each voice's individual **Scale**, **Level**, and **Pan**. |
 | **Unison** | `On` / `Off` | Enables the dedicated 10th unison doubling voice (conditioned through an `8.5 kHz` warm analog low-pass filter). |
-| **U.Rand** | `0.0` to `100.0` | Controls Ornstein-Uhlenbeck pitch drift ($\pm 9\text{ cents}$) and delay modulation for natural vocal doubling. |
+| **U.Rand** | `0.0` to `100.0` *(Default: `0.0`)* | Controls Ornstein-Uhlenbeck pitch drift ($\pm 9\text{ cents}$) and delay modulation for natural vocal doubling. Opens at `0.0` for 100% deterministic pitch and phase; humanization acts above `0.0`. |
 | **U.Form** | `-50.0` to `+50.0` | Shifts vocal tract formant frequencies of the Unison voice without altering pitch. |
 | **U.Quant** | `0.0` to `100.0` | Pitch quantization strength for the Unison voice. |
 | **U.Level** | `-24.0 dB` to `0.0 dB` | Output level of the Unison voice. |
@@ -97,65 +100,65 @@ Four independent PSOLA harmony channels. Engaging **Dual** on all 4 voices along
 | **On** | `On` / `Off` | Enables or disables the voice channel with a 40 ms anti-click envelope and zero CPU consumption when idle. |
 | **Dual** | `On` / `Off` | Activates a twin sub-voice panned to the opposite stereo side (`-Pan`) with shifted formants, $-9\text{ cents}$ detune, $+14\text{ ms}$ Haas delay, and an `8.5 kHz` warm low-pass filter. |
 | **Scale** | `37 Options` | Selects `MIDI`, custom `User` scale, or 35 Akai preset harmony tables (`Low Octave`, `Low 3rd`, `Low 5th`, `Low 7th`, `Unison`, `High 3rd`, `High 5th`, `High 7th`, `High Octave`). |
-| **Random** | `0.0` to `100.0` | Humanizes pitch drift and timing micro-jitter per sub-voice. |
-| **Formant** | `-50.0` to `+50.0` | Rescales vocal tract formant envelope combined with 4th-order LPC spectral envelope morphing. |
+| **Random** | `0.0` to `100.0` *(Default: `0.0`)* | Humanizes pitch drift ($\pm 9\text{ cents}$) and timing micro-jitter per sub-voice. Opens at `0.0` for 100% deterministic pitch and phase; Ornstein-Uhlenbeck drift and dynamic 9V sag micro-cents act above `0.0`. |
+| **Formant** | `-50.0` to `+50.0` | Shifts vocal tract formant envelope with strict formant preservation (`src_step = formant_ratio`). |
 | **Quantise** | `0.0` to `100.0` | Blends between natural vocal inflection tracking (`0%`) and chromatic grid locking (`100%`). |
 | **Level** | `-24.0 dB` to `0.0 dB` | Channel output level. |
 | **Pan** | `-50` (L) to `+50` (R) | Stereo pan position for the main voice (and mirror `-Pan` for the Dual voice). |
 
 ---
 
-## 🔬 Hardware Simulation Architecture (Akai HV10)
+## 🔬 Hardware Simulation Architecture (Akai HV10 & Ariwa Studio)
 
 ```text
                ┌─────────────────────────────────────────────────────────────┐
                │           INPUT SIGNAL (Mono L or Summed L + R)             │
                └──────────────────────────────┬──────────────────────────────┘
                                               │
-                                              ▼
-               ┌─────────────────────────────────────────────────────────────┐
-               │ 1. TRANSFORMER & 2x SIMD OVERSAMPLED ANALOG FRONT-END       │
-               │ • Input Transformer Hysteresis & 4kΩ/33kΩ Impedance Curve   │
-               │ • 9V DC / 250mA Power Supply Sag & 100 Hz Ripple Modulator  │
-               │ • SIMD 2x Polyphase Half-Band Upsampler (NEON / SSE2)       │
-               │ • Discrete 2SC3330 BJT (TR1-TR3) + 1SS133T-77 Diode Clip    │
-               │ • JRC NJM4558L Op-Amp (IC12) Slew-Rate & Sag-Modulated Rail │
-               │ • SIMD 2x Half-Band Decimator + 5 Hz Precision DC Blocker   │
-               └──────────────────────────────┬──────────────────────────────┘
-                                              │
                       ┌───────────────────────┴───────────────────────┐
                       │                                               │
-           [ DIRECT ANALOG PATH ]                          [ DIGITAL DSP PATH ]
-           • Live: 0 ms delay                             (Burr-Brown PCM3003E ADC)
-           • Studio: Phase-aligned to PDC                             │
-                      │                                               ▼
+           [ DIRECT LINEAR PATH ]                          [ DIGITAL DSP PATH ]
+           • Mechanical Relays (RL1/RL2 RY-9WK)            (Burr-Brown PCM3003E ADC)
+           • 100% Linear & Transparent (0% THD)                       │
+           • 20 Hz - 20 kHz Flat Response                             │
+           • Live: 0 ms delay / Studio: 2496 PDC                      ▼
                       │                       ┌───────────────────────────────────────────────┐
-                      │                       │ 2. ASYNC LOCK-FREE & TIME-SLICED YIN ENGINE   │
-                      │                       │ • Dedicated Lock-Free Background Worker Thread│
+                      │                       │ 1. TIME-SLICED YIN & SIBILANCE ENGINE         │
+                      │                       │ • 1536-Sample Synchronous Window (down to 42Hz│
                       │                       │ • Adaptive ~22.05 kHz Decimation (2x/4x/8x SR)│
-                      │                       │ • Sibilance ZCR Detector & 4th-Order LPC      │
-                      │                       │   Levinson-Durbin Spectral Envelope Extractor │
+                      │                       │ • Peak Glottal Epoch Tracker on Filtered LP   │
+                      │                       │ • Zero-Crossing Rate & High-Freq Sibilance Det│
                       │                       └───────────────────────┬───────────────────────┘
                       │                                               │
                       │                                               ▼
                       │                       ┌───────────────────────────────────────────────┐
-                      │                       │ 3. 9x PSOLA SYNTHESIS (ADSP-2186M ENGINE)     │
-                      │                       │ • L1 Interleaved Cache Ring ([out, w] x 4096) │
-                      │                       │ • Shared Glottal Grain Cache (Main + Dual)    │
-                      │                       │ • LPC Spectral Envelope Pre-Whitening & Morph │
-                      │                       │ • Post-NOLA ADSP-2186M 16-bit Q15 Quantizer   │
-                      │                       │   with 40-bit MAC & 1st-Order Noise Shaping   │
-                      │                       │ • Monte Carlo ±2% Component Aging Tolerance   │
-                      │                       │   on 32.78 Hz HPF & 12.83 kHz / 8.5 kHz LPF   │
+                      │                       │ 2. 10x TD-PSOLA ENGINE (ADSP-2186M HERITAGE)  │
+                      │                       │ • 4-Point Hermite Cubic Interpolation (C1)    │
+                      │                       │ • Strict Formant Preservation (src_step = fr) │
+                      │                       │ • 8192-Sample L1 Interleaved Ring Buffer      │
+                      │                       │ • Exact 50% Hann Overlap-Add (NOLA sum = 1.0) │
+                      │                       │ • Post-NOLA 16-bit Q15 Quantizer + 40-bit MAC │
+                      │                       │ • Akai 32.78 Hz Subsonic HPF & Voice DAC LPF  │
+                      │                       └───────────────────────┬───────────────────────┘
+                      │                                               │
+                      │                                               ▼
+                      │                       ┌───────────────────────────────────────────────┐
+                      │                       │ 3. CHOIR ANALOG BUS (ARIWA STUDIO & HV10)     │
+                      │                       │ • Ariwa Console 185 Hz Low-Mid Warmth Shelf   │
+                      │                       │ • 9V DC / 250mA Dynamic Power Supply Sag      │
+                      │                       │   (Modeled on C22 220µF Electrolytic Cap)     │
+                      │                       │ • JRC NJM4558L Symmetric Rail Saturation      │
+                      │                       │ • Sallen-Key Active LP Filter (16.8 kHz)      │
+                      │                       │ • SIP-8 Dual-Opamp Stereo Crosstalk (-62 dB)  │
                       │                       └───────────────────────┬───────────────────────┘
                       │                                               │
                       └───────────────────────┬───────────────────────┘
                                               ▼
                ┌─────────────────────────────────────────────────────────────┐
-               │ 4. STEREO RECONSTRUCTION & NJM4558L CROSSTALK STAGE         │
-               │ • Burr-Brown PCM3003E (IC3) + LAP02TA Coils (L1/L2) 16.8kHz │
-               │ • Dual NJM4558L (IC13/IC14) Capacitive & Thermal Crosstalk  │
-               │ • Asymptotic Soft-Clipper (-2.5 dBFS ceiling)               │
+               │ 4. MASTER SUM & ANALOG BUS SOFT LIMITER                     │
+               │ • Transparent Linear Pass-Through for |x| <= 0.92 (0% THD)  │
+               │ • C1-Continuous Asymptotic Soft-Knee (Neve/Tape saturation) │
+               │ • Zero Hard Digital Clipping Artifacts                      │
                └──────────────────────────────┬──────────────────────────────┘
                                               │
                                               ▼

@@ -10,3 +10,4 @@ target/
 /target
 *.wav
 *.zip
+.DS_Store

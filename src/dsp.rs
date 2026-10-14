@@ -1,25 +1,29 @@
 //! Motor DSP Otimizado e Modelagem do Barramento de Harmonias (Akai HV10 & Ariwa Studio).
-//! - Caminho Direct e entrada YIN 100% transparentes e lineares (zero perda de agudos).
+//! - Caminho Direct 100% linear e transparente (20 Hz - 20 kHz, 0% THD).
 //! - Rastreamento YIN sincrono Time-Sliced com janela de 1536 amostras (suporte ate 42 Hz).
-//! - PSOLA com periodo `ta` desacoplado de `out_delay` (graves perfeitos mesmo no modo Live)
-//!   e janela de Hann unica com soma NOLA exata (zero dips na Low Octave).
-//! - ChoirAnalogBus: aplicado exclusivamente no somatorio das harmonias (185 Hz console warmth,
-//!   sag de 9V DC / 250mA, saturacao simetrica NJM4558L, crosstalk -62 dB e filtro PCM3003E 16.8 kHz).
+//! - Ancoragem causal da borda esquerda do grao no anel de 8192 amostras + janela Hann 2.0*Ts:
+//!   garante sobreposicao constante (soma de pesos = 1.0) sem lacunas na Low Octave em 65 Hz
+//!   mesmo no modo Live e sem cancelamento de fase em High 5th.
+//! - Random (padrao 0.0): controla exclusivamente humanizacao de pitch/tempo (Ornstein-Uhlenbeck
+//!   +-9 cents / 16 ms + micro-sag de pitch da fonte de 9V DC nos picos dinamicos).
+//! - Drive (Analog Drive): controla exclusivamente o timbre do ChoirAnalogBus (185 Hz shelf,
+//!   saturacao simetrica dos op-amps NJM4558L com sag de 9V DC e crosstalk estereo de -62 dB).
 
 use std::f32::consts::PI;
 
 pub const RING_SIZE: usize = 32768;
 pub const RING_MASK: usize = RING_SIZE - 1;
-pub const VOICE_RING_SIZE: usize = 4096;
+pub const VOICE_RING_SIZE: usize = 8192;
 pub const VOICE_RING_MASK: usize = VOICE_RING_SIZE - 1;
 pub const DELAY_SIZE: usize = 16384;
 pub const DELAY_MASK: usize = DELAY_SIZE - 1;
 pub const HANN_LUT_SIZE: usize = 2048;
-pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 1.35;
+pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 2.0;
+pub const MAX_CACHE_RADIUS: isize = 1800;
 
 pub const AKAI_SUBSONIC_HP_HZ: f32 = 32.784804;
-pub const AKAI_MAIN_VOICE_LP_HZ: f32 = 14500.0;
-pub const AKAI_DUAL_WARM_LP_HZ: f32 = 9000.0;
+pub const AKAI_MAIN_VOICE_LP_HZ: f32 = 14800.0;
+pub const AKAI_DUAL_WARM_LP_HZ: f32 = 11500.0;
 pub const PCM3003_RECON_LP_HZ: f32 = 16800.0;
 
 const OU_A: f32 = 0.99995;
@@ -53,10 +57,12 @@ impl ScopedFtzDaz {
         #[cfg(target_arch = "x86_64")]
         unsafe {
             let mut prev: u32 = 0;
-            core::arch::asm!("stmxcsr [{}]", in(reg) &mut prev, options(nostack, preserves_flags));
-            let next = prev | 0x8040;
+            let prev_ptr: *mut u32 = &mut prev;
+            core::arch::asm!("stmxcsr [{}]", in(reg) prev_ptr, options(nostack, preserves_flags));
+            let next: u32 = prev | 0x8040;
             if next != prev {
-                core::arch::asm!("ldmxcsr [{}]", in(reg) &next, options(nostack, preserves_flags));
+                let next_ptr: *const u32 = &next;
+                core::arch::asm!("ldmxcsr [{}]", in(reg) next_ptr, options(nostack, preserves_flags));
             }
             Self { prev_mxcsr: prev }
         }
@@ -74,13 +80,14 @@ impl Drop for ScopedFtzDaz {
         }
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            core::arch::asm!("ldmxcsr [{}]", in(reg) &self.prev_mxcsr, options(nostack, preserves_flags));
+            let prev_ptr: *const u32 = &self.prev_mxcsr;
+            core::arch::asm!("ldmxcsr [{}]", in(reg) prev_ptr, options(nostack, preserves_flags));
         }
     }
 }
 
 #[inline]
-pub fn max_grain_for_sr(_sr: f32) -> usize { 2048 }
+pub fn max_grain_for_sr(_sr: f32) -> usize { 4096 }
 
 #[inline]
 pub fn lookahead_samples_for_sr(sr: f32) -> usize {
@@ -89,10 +96,10 @@ pub fn lookahead_samples_for_sr(sr: f32) -> usize {
 
 #[inline]
 pub fn out_delay_for_sr(sr: f32) -> usize {
-    ((960.0 * (sr / 44_100.0)).round() as usize).clamp(768, 1792)
+    ((960.0 * (sr / 44_100.0)).round() as usize).clamp(768, 2048)
 }
 
-/// Modo Live: Direct com 0 ms de atraso e harmonias com 384 amostras (~8.7 ms a 44.1 kHz)
+/// Modo Live: Direct com 0 ms de atraso e harmonias com 384 + 384 = 768 amostras (~17.4 ms a 44.1 kHz)
 #[inline]
 pub fn live_lookahead_for_sr(sr: f32) -> usize {
     ((384.0 * (sr / 44_100.0)).round() as usize).clamp(256, 1536)
@@ -103,7 +110,6 @@ pub fn live_out_delay_for_sr(sr: f32) -> usize {
     ((384.0 * (sr / 44_100.0)).round() as usize).clamp(256, 1536)
 }
 
-/// Decimacao adaptativa para ~22.05 kHz com janela de 1536 amostras (cobre >2 periodos a 42 Hz)
 #[inline]
 pub fn yin_params_for_sr(sr: f32) -> (usize, usize, usize) {
     let decim = ((sr / 22_050.0).round() as usize).clamp(2, 8);
@@ -119,7 +125,7 @@ pub fn hz_to_midi(f_hz: f32, tune_hz: f32) -> f32 {
 
 #[inline(always)]
 pub fn fast_exp2_small(x: f32) -> f32 {
-    1.0 + x * (0.6931472 + x * (0.2402265 + x * 0.0555041))
+    1.0 + x * (std::f32::consts::LN_2 + x * (0.2402265 + x * 0.0555041))
 }
 
 #[inline]
@@ -139,28 +145,43 @@ pub fn pan50_to_gains(pan_50: f32) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
+/// Interpolacao Cubica Hermite de 4 pontos (Catmull-Rom, C1-continua).
+/// Elimina a perda de agudos (sinc^2 attenuation) e espurios de aliasing da interpolacao linear.
 #[inline(always)]
-pub fn soft_saturate(x: f32) -> f32 {
-    const THRESHOLD: f32 = 0.78;
+pub fn hermite_interp(ym1: f32, y0: f32, y1: f32, y2: f32, f: f32) -> f32 {
+    let c0 = y0;
+    let c1 = 0.5 * (y1 - ym1);
+    let c2 = ym1 - 2.5 * y0 + 2.0 * y1 - 0.5 * y2;
+    let c3 = 0.5 * (y2 - ym1) + 1.5 * (y0 - y1);
+    ((c3 * f + c2) * f + c1) * f + c0
+}
+
+/// Limitador suave analogico de barramento master (estilo transformador Rupert Neve / fita).
+/// - Transparente e 100% linear para |x| <= 0.92 (0% THD no caminho nominal).
+/// - Saturacao assintotica C1-continua acima de 0.92, evitando ceifa digital rigida (hard clipping).
+#[inline(always)]
+pub fn analog_bus_soft_limit(x: f32) -> f32 {
+    const THRESHOLD: f32 = 0.92;
+    const MARGIN: f32 = 0.999 - THRESHOLD;
     if x > THRESHOLD {
-        let over = x - THRESHOLD;
-        THRESHOLD + (1.0 - THRESHOLD) * (over / (1.0 + over))
+        let u = x - THRESHOLD;
+        THRESHOLD + u / (1.0 + u / MARGIN)
     } else if x < -THRESHOLD {
-        let under = -x - THRESHOLD;
-        -(THRESHOLD + (1.0 - THRESHOLD) * (under / (1.0 + under)))
+        let u = -x - THRESHOLD;
+        -(THRESHOLD + u / (1.0 + u / MARGIN))
     } else {
         x
     }
 }
 
 /// Barramento Analogico Estereo do Coro (Akai HV10 IC13/IC14 NJM4558L + PCM3003E + Ariwa Warmth).
-/// Aplicado EXCLUSIVAMENTE nas vozes sintetizadas (Unison + Harmonias), mantendo o Direct 100% puro.
+/// Controlado pelo knob global `Drive` (0..100%) e aplicado exclusivamente no Choir Bus.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChoirAnalogBus {
     warm_l_z1: f32,
     warm_r_z1: f32,
     warm_a: f32,
-    sag_env: f32,
+    pub sag_env: f32,
     prev_l: f32,
     prev_r: f32,
     therm_l: f32,
@@ -191,19 +212,27 @@ impl ChoirAnalogBus {
     #[inline(always)]
     fn njm4558_rail_saturate(v: f32, ceiling: f32) -> f32 {
         let x = v.clamp(-2.5, 2.5);
-        // Curva Padé tanh simetrica suave (zero DC offset, apenas harmonicos impares suaves)
         let d = x / ceiling;
         let d2 = d * d;
         ceiling * d * (27.0 + d2) / (27.0 + 9.0 * d2)
     }
 
     #[inline(always)]
-    pub fn process_stereo(&mut self, wet_l: f32, wet_r: f32, active_voices: usize) -> (f32, f32) {
-        // 1. Ariwa Console Low-Mid Warmth Shelf em 185 Hz (+1.2 dB de corpo nas harmonias)
+    pub fn process_stereo(
+        &mut self,
+        wet_l: f32,
+        wet_r: f32,
+        drive_norm: f32,
+        active_voices: usize,
+    ) -> (f32, f32) {
+        let drv = drive_norm.clamp(0.0, 1.0);
+
+        // 1. Ariwa Console Low-Mid Warmth Shelf em 185 Hz (proporcional ao Drive)
         self.warm_l_z1 = (1.0 - self.warm_a) * wet_l + self.warm_a * self.warm_l_z1;
         self.warm_r_z1 = (1.0 - self.warm_a) * wet_r + self.warm_a * self.warm_r_z1;
-        let w_l = wet_l + 0.14 * self.warm_l_z1;
-        let w_r = wet_r + 0.14 * self.warm_r_z1;
+        let shelf_gain = 0.28 * drv;
+        let w_l = wet_l + shelf_gain * self.warm_l_z1;
+        let w_r = wet_r + shelf_gain * self.warm_r_z1;
 
         // 2. Sag dinamico da fonte de 9V DC / 250mA sob carga polifonica
         let energy = 0.5 * (w_l.abs() + w_r.abs()) * (1.0 + 0.08 * (active_voices as f32));
@@ -212,27 +241,37 @@ impl ChoirAnalogBus {
         } else {
             self.sag_env = 0.9997 * self.sag_env + 0.0003 * energy;
         }
-        let ceiling = (0.96 - 0.08 * self.sag_env.clamp(0.0, 1.0)).clamp(0.84, 0.96);
 
-        // 3. Saturacao suave do estagio de saida NJM4558L (IC13/IC14)
-        let sat_l = Self::njm4558_rail_saturate(w_l, ceiling);
-        let sat_r = Self::njm4558_rail_saturate(w_r, ceiling);
+        // 3. Saturacao simetrica dos op-amps NJM4558L (IC13/IC14) controlada por Drive
+        let (sat_l, sat_r) = if drv > 1e-3 {
+            let ceiling = (0.96 - 0.12 * drv * self.sag_env.clamp(0.0, 1.0)).clamp(0.78, 0.96);
+            let pre_drv = 1.0 + 0.85 * drv;
+            let inv_drv = 1.0 / (1.0 + 0.55 * drv);
+            let sl = Self::njm4558_rail_saturate(w_l * pre_drv, ceiling) * inv_drv;
+            let sr_out = Self::njm4558_rail_saturate(w_r * pre_drv, ceiling) * inv_drv;
+            (
+                w_l * (1.0 - drv) + sl * drv,
+                w_r * (1.0 - drv) + sr_out * drv,
+            )
+        } else {
+            (w_l, w_r)
+        };
 
         // 4. Filtro de reconstrucao analogico Burr-Brown PCM3003E (IC3) + indutores LAP02TA (16.8 kHz)
         let rec_l = self.recon_l.process(sat_l);
         let rec_r = self.recon_r.process(sat_r);
 
-        // 5. Crosstalk capacitivo e termico inter-canal do pacote duplo NJM4558L (-62 dB)
-        let cap_r = (rec_r - self.prev_r) * 0.00075;
-        let cap_l = (rec_l - self.prev_l) * 0.00075;
+        // 5. Crosstalk capacitivo e termico do pacote duplo NJM4558L escalado por Drive
+        let cap_r = (rec_r - self.prev_r) * (0.0012 * drv);
+        let cap_l = (rec_l - self.prev_l) * (0.0012 * drv);
         self.prev_l = rec_l;
         self.prev_r = rec_r;
         self.therm_l = 0.999 * self.therm_l + 0.001 * rec_l;
         self.therm_r = 0.999 * self.therm_r + 0.001 * rec_r;
 
         (
-            rec_l + cap_r + 0.00035 * self.therm_r,
-            rec_r + cap_l + 0.00035 * self.therm_l,
+            rec_l + cap_r + (0.0005 * drv) * self.therm_r,
+            rec_r + cap_l + (0.0005 * drv) * self.therm_l,
         )
     }
 }
@@ -281,7 +320,7 @@ pub fn build_hann_lut() -> Vec<f32> {
     lut
 }
 
-/// Kernel de diferenca quadratica com 8 acumuladores independentes (auto-vetorizacao NEON/AVX sem stalls)
+#[allow(clippy::chunks_exact_to_as_chunks)]
 #[inline(always)]
 fn sq_diff_simd(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0.0_f32; 8];
@@ -590,11 +629,11 @@ impl PitchTracker {
     }
 }
 
-/// Cache de amostras brutas do periodo glotal para compartilhamento entre Main e Dual (sem janela dupla!)
+/// Cache de amostras brutas do periodo glotal chaveado exclusivamente por `safe_mark`
+/// (Main e Dual compartilham a mesma janela sem invalidacao cruzada).
 #[derive(Clone, Debug)]
 pub struct SharedGrainCache {
     pub cached_mark: usize,
-    pub cached_reach: isize,
     pub buf: Vec<f32>,
 }
 
@@ -604,21 +643,23 @@ impl Default for SharedGrainCache {
 
 impl SharedGrainCache {
     pub fn new() -> Self {
-        Self { cached_mark: usize::MAX, cached_reach: 0, buf: vec![0.0; 3073] }
+        Self {
+            cached_mark: usize::MAX,
+            buf: vec![0.0; (2 * MAX_CACHE_RADIUS + 1) as usize],
+        }
     }
 
     pub fn reset(&mut self) {
         self.cached_mark = usize::MAX;
-        self.cached_reach = 0;
     }
 
     #[inline]
-    pub fn ensure_extracted(&mut self, dry_ring: &[f32], safe_mark: usize, reach: isize) {
-        let r = reach.clamp(16, 1500);
-        if self.cached_mark == safe_mark && self.cached_reach == r { return; }
+    pub fn ensure_extracted(&mut self, dry_ring: &[f32], safe_mark: usize) {
+        if self.cached_mark == safe_mark {
+            return;
+        }
         self.cached_mark = safe_mark;
-        self.cached_reach = r;
-
+        let r = MAX_CACHE_RADIUS;
         let len = (2 * r + 1) as usize;
         for idx in 0..len {
             let offset = idx as isize - r;
@@ -642,11 +683,13 @@ pub struct PsolaSubVoice {
     hp_x1: f32,
     hp_y1: f32,
     dac_lp_z1: f32,
+    sag_polarity: f32,
     is_dual_warm: bool,
 }
 
 impl PsolaSubVoice {
     pub fn new(seed: u32) -> Self {
+        let sag_polarity = if (seed & 1) == 0 { 1.0 } else { -1.0 };
         Self {
             out_w_ring: vec![[0.0; 2]; VOICE_RING_SIZE],
             delay_line: vec![0.0; DELAY_SIZE],
@@ -660,6 +703,7 @@ impl PsolaSubVoice {
             hp_x1: 0.0,
             hp_y1: 0.0,
             dac_lp_z1: 0.0,
+            sag_polarity,
             is_dual_warm: false,
         }
     }
@@ -704,7 +748,7 @@ impl PsolaSubVoice {
         max_grain: usize,
     ) -> f32 {
         self.step_sample_with_cache(
-            dry_ring, hann_lut, None, 0.0,
+            dry_ring, hann_lut, None, 0.0, 0.0,
             write_pos, read_pos, emit_pos, latest_mark,
             voiced_mask, emit_mask, f0_hz, pitch_ratio, formant_ratio,
             random_norm, extra_cents, extra_delay_ms, unvoiced_gain, sr, max_grain,
@@ -717,8 +761,9 @@ impl PsolaSubVoice {
         &mut self,
         dry_ring: &[f32],
         hann_lut: &[f32],
-        mut shared_cache: Option<&mut SharedGrainCache>,
+        shared_cache: Option<&mut SharedGrainCache>,
         sibilance_factor: f32,
+        psu_sag_env: f32,
         write_pos: usize,
         read_pos: usize,
         emit_pos: usize,
@@ -738,10 +783,13 @@ impl PsolaSubVoice {
         let n_pitch = self.rng_pitch.next_bipolar();
         let n_delay = self.rng_delay.next_bipolar();
 
+        // Em Random = 0.0, drift_cents e sag_pitch_cents sao identicamente 0.0
         self.drift_cents =
             OU_A * self.drift_cents + OU_ONE_MINUS_A_TIMES_K * n_pitch * (9.0 * random_norm);
         self.delay_rand_norm =
             OU_A * self.delay_rand_norm + OU_ONE_MINUS_A_TIMES_K * n_delay;
+
+        let sag_pitch_cents = self.sag_polarity * psu_sag_env.clamp(0.0, 1.0) * (2.2 * random_norm);
 
         let jitter_ms = (self.delay_rand_norm * 0.5 + 0.5).clamp(0.0, 1.5) * (16.0 * random_norm);
         let target_delay_ms = jitter_ms + extra_delay_ms;
@@ -749,15 +797,13 @@ impl PsolaSubVoice {
             (target_delay_ms * 0.001 * sr).clamp(0.0, (DELAY_SIZE - 16) as f32);
         self.delay_mod_samples = 0.999 * self.delay_mod_samples + 0.001 * target_delay_samp;
 
-        let ring_cap = max_grain.min(VOICE_RING_SIZE / 2);
-        let active_out_delay = read_pos.wrapping_sub(emit_pos).clamp(64, ring_cap / 2);
-        let max_safe_grain = ((active_out_delay * 2).saturating_sub(8) | 1).min(ring_cap - 1);
+        // Com ancoragem causal da borda esquerda, o grao pode ter ate 4079 amostras no anel de 8192
+        let max_safe_grain = (max_grain.min(VOICE_RING_SIZE / 2).saturating_sub(16) | 1).max(63);
 
         if voiced_mask > 0.01 && f0_hz > 40.0 {
-            let cents_oct = (self.drift_cents + extra_cents) * (1.0 / 1200.0);
+            let cents_oct = (self.drift_cents + sag_pitch_cents + extra_cents) * (1.0 / 1200.0);
             let cents_factor = fast_exp2_small(cents_oct);
             let ratio = (pitch_ratio * cents_factor).clamp(0.25, 4.0);
-            // `ta` e desacoplado de `max_safe_grain`: suporta fundamentais graves ate ~42 Hz mesmo em modo Live!
             let max_ta = (1050.0 * (sr / 44_100.0)).clamp(512.0, 4096.0);
             let ta = (sr / f0_hz).clamp(20.0, max_ta);
             let ts = (ta / ratio).clamp(12.0, max_ta * 2.0);
@@ -765,17 +811,20 @@ impl PsolaSubVoice {
             self.synth_phase -= 1.0;
             if self.synth_phase <= 0.0 {
                 self.synth_phase += ts;
-                let grain_len = ((2.0 * ta).max(PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
+                // Janela de sintese de 2.0 * ts garante sobreposicao de 50% (soma de pesos Hann = 1.0 constante)
+                let grain_len = ((PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
                     .clamp(31, max_safe_grain);
                 self.splat_grain_interleaved(
                     dry_ring,
                     hann_lut,
-                    shared_cache.as_deref_mut(),
+                    shared_cache,
                     write_pos,
                     latest_mark,
                     read_pos,
+                    emit_pos,
                     grain_len,
                     ta,
+                    ratio,
                     formant_ratio,
                     max_safe_grain,
                 );
@@ -788,7 +837,7 @@ impl PsolaSubVoice {
         let pair = self.out_w_ring[v_idx];
         self.out_w_ring[v_idx] = [0.0, 0.0];
 
-        let wet_nola = pair[0] / pair[1].max(0.25);
+        let wet_nola = pair[0] / pair[1].max(0.35);
 
         // Quantizacao simetrica pura de 16 bits do barramento ADSP-2186MKST-300 (IC1) pos-NOLA
         let wet_adsp2186 = if emit_mask > 0.01 {
@@ -810,9 +859,13 @@ impl PsolaSubVoice {
         self.hp_x1 = combined;
         self.hp_y1 = hp_out;
 
-        // 2. Filtro DAC por voz (14.5 kHz Main / 9.0 kHz Dual & Unison Warmth)
-        let lp_fc = if self.is_dual_warm { AKAI_DUAL_WARM_LP_HZ } else { AKAI_MAIN_VOICE_LP_HZ };
-        let lp_a = (-2.0 * PI * lp_fc.min(sr * 0.45) / sr).exp();
+        // 2. Filtro DAC por voz (abre dinamicamente em sibilantes nas vozes Dual/Unison)
+        let base_lp = if self.is_dual_warm {
+            AKAI_DUAL_WARM_LP_HZ + 4500.0 * sibilance_factor.clamp(0.0, 1.0)
+        } else {
+            AKAI_MAIN_VOICE_LP_HZ
+        };
+        let lp_a = (-2.0 * PI * base_lp.min(sr * 0.45) / sr).exp();
         let dac_out = (1.0 - lp_a) * hp_out + lp_a * self.dac_lp_z1;
         self.dac_lp_z1 = dac_out;
 
@@ -838,22 +891,34 @@ impl PsolaSubVoice {
         shared_cache: Option<&mut SharedGrainCache>,
         write_pos: usize,
         mark_center: usize,
-        out_center: usize,
+        read_pos: usize,
+        emit_pos: usize,
         l_base: usize,
-        ta: f32,
+        _ta: f32,
+        _pitch_ratio: f32,
         formant_ratio: f32,
         max_safe_grain: usize,
     ) {
         let fr = formant_ratio.clamp(0.5, 2.0);
-        let l_Desired = (((l_base as f32) / fr).round() as usize | 1).clamp(17, max_safe_grain);
-        // Garante que a leitura na fonte nunca ultrapasse 1.35 * ta e que a janela de Hann
-        // seja calculada exatamente sobre o comprimento efetivo (zero bordas mudas com peso Hann!)
-        let max_src_reach = (ta * 1.35).clamp(24.0, 1480.0);
-        let max_l_by_src = (((2.0 * max_src_reach) / fr).floor() as usize | 1).max(17);
-        let l_out = l_Desired.min(max_l_by_src).min(max_safe_grain);
+        // Preservacao estrita de formantes (Regra 3 de DSP): a taxa de leitura dentro do grao
+        // segue exclusivamente `formant_ratio`, sem escala por `pitch_ratio`.
+        let src_step = fr;
+
+        let l_desired = (((l_base as f32) / fr.max(0.75)).round() as usize | 1).clamp(17, max_safe_grain);
+        let max_src_reach = (MAX_CACHE_RADIUS - 8) as f32;
+        let max_l_by_src = (((2.0 * max_src_reach) / src_step).floor() as usize | 1).max(17);
+        let l_out = l_desired.min(max_l_by_src).min(max_safe_grain);
         let half_out = (l_out / 2) as isize;
 
-        let actual_src_reach = ((half_out as f32) * fr).ceil() as isize + 2;
+        let active_out_delay = read_pos.wrapping_sub(emit_pos);
+        let min_center_dist = (half_out as usize) + 8;
+        let out_center = if active_out_delay < min_center_dist {
+            emit_pos.wrapping_add(min_center_dist)
+        } else {
+            read_pos
+        };
+
+        let actual_src_reach = (((half_out as f32) * src_step).ceil() as isize + 2).min(MAX_CACHE_RADIUS - 2);
         let min_dist_from_write = (actual_src_reach as usize) + 4;
         let dist_to_write = write_pos.wrapping_sub(mark_center);
         let safe_mark = if dist_to_write < min_dist_from_write {
@@ -866,17 +931,22 @@ impl PsolaSubVoice {
         let mut lut_phase = 0usize;
 
         if let Some(cache) = shared_cache {
-            cache.ensure_extracted(dry_ring, safe_mark, actual_src_reach);
-            let rad_f = cache.cached_reach as f32;
+            cache.ensure_extracted(dry_ring, safe_mark);
+            let rad_f = MAX_CACHE_RADIUS as f32;
+            let max_idx_f = (2 * MAX_CACHE_RADIUS - 1) as f32;
+            let max_idx = max_idx_f as usize;
             let cache_slice = &cache.buf;
 
             for k in 0..l_out {
                 let offset_out = k as isize - half_out;
-                let src_off = (offset_out as f32) * fr;
-                let pos = (src_off + rad_f).clamp(0.0, (2 * cache.cached_reach - 1) as f32);
+                let src_off = (offset_out as f32) * src_step;
+                let pos = (src_off + rad_f).clamp(0.0, max_idx_f);
                 let i0 = pos.floor() as usize;
                 let frac = pos - (i0 as f32);
-                let sample = cache_slice[i0] + frac * (cache_slice[i0 + 1] - cache_slice[i0]);
+                let im1 = i0.saturating_sub(1);
+                let i1 = (i0 + 1).min(max_idx);
+                let i2 = (i0 + 2).min(max_idx);
+                let sample = hermite_interp(cache_slice[im1], cache_slice[i0], cache_slice[i1], cache_slice[i2], frac);
 
                 let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
                 lut_phase += lut_step;
@@ -888,12 +958,14 @@ impl PsolaSubVoice {
         } else {
             for k in 0..l_out {
                 let offset_out = k as isize - half_out;
-                let src_off = (offset_out as f32) * fr;
+                let src_off = (offset_out as f32) * src_step;
                 let src_i0 = src_off.floor() as isize;
                 let frac = src_off - (src_i0 as f32);
                 let p0 = (safe_mark as isize + src_i0) as usize & RING_MASK;
+                let pm1 = p0.wrapping_sub(1) & RING_MASK;
                 let p1 = (p0 + 1) & RING_MASK;
-                let sample = dry_ring[p0] + frac * (dry_ring[p1] - dry_ring[p0]);
+                let p2 = (p0 + 2) & RING_MASK;
+                let sample = hermite_interp(dry_ring[pm1], dry_ring[p0], dry_ring[p1], dry_ring[p2], frac);
 
                 let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
                 lut_phase += lut_step;
@@ -934,63 +1006,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_psola_ring_no_ghost_echo_and_clean_low_octave() {
+    fn test_psola_live_low_octave_envelope_regularity_and_no_ghost_echo() {
         let _ftz = ScopedFtzDaz::new();
         let sr = 44_100.0;
         let hann_lut = build_hann_lut();
         let mut voice = PsolaSubVoice::new(1);
         let mut dry_ring = vec![0.0_f32; RING_SIZE];
-        let mut write_pos = 2048usize;
-        // Testa nota grave masculina (65 Hz = C2) no modo Live (out_delay = 384) em Low Octave (0.5)
+        let mut write_pos = 4096usize;
         let f0 = 65.0_f32;
         let period = (sr / f0) as usize;
         let mut latest_mark = write_pos - 384;
         let max_grain = max_grain_for_sr(sr);
 
+        let mut ys = Vec::with_capacity(18_000);
         let mut silence_rms_acc = 0.0_f32;
         let mut silence_count = 0usize;
-        let mut active_energy = 0.0_f32;
 
-        for step in 0..16_000 {
-            let x = if step < 6000 { (2.0 * PI * f0 * (step as f32) / sr).sin() * 0.8 } else { 0.0 };
-            let voiced = if step < 6000 { 1.0 } else { 0.0 };
+        for step in 0..18_000 {
+            let t = (step as f32) / sr;
+            let x = if step < 8000 {
+                (0.55 * (2.0 * PI * f0 * t).sin()
+                    + 0.30 * (2.0 * PI * (2.0 * f0) * t).sin()
+                    + 0.20 * (2.0 * PI * (4.0 * f0) * t).cos()
+                    + 0.15 * (2.0 * PI * (6.0 * f0) * t).sin())
+                    * 0.75
+            } else {
+                0.0
+            };
+            let voiced = if step < 8000 { 1.0 } else { 0.0 };
             dry_ring[write_pos & RING_MASK] = x;
 
             let read_pos = write_pos.wrapping_sub(384);
             let emit_pos = read_pos.wrapping_sub(384);
-            if step < 6000 && read_pos.wrapping_sub(latest_mark) >= period {
+            if step < 8000 && read_pos.wrapping_sub(latest_mark) >= period {
                 latest_mark = read_pos;
             }
-            let emit_voiced = if step >= 768 && step < 6000 + 768 { 1.0 } else { 0.0 };
+            let emit_voiced = if (768..8000 + 2048).contains(&step) { 1.0 } else { 0.0 };
 
             let y = voice.step_sample(
                 &dry_ring, &hann_lut, write_pos, read_pos, emit_pos, latest_mark,
                 voiced, emit_voiced, f0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, sr, max_grain,
             );
+            ys.push(y);
 
-            if step > 2000 && step < 5000 {
-                active_energy += y * y;
-            }
-            if step > 10_000 {
+            if step > 13_000 {
                 silence_rms_acc += y * y;
                 silence_count += 1;
             }
             write_pos = write_pos.wrapping_add(1);
         }
 
-        let active_rms = (active_energy / 3000.0).sqrt();
-        let ghost_rms = (silence_rms_acc / silence_count as f32).sqrt();
-        assert!(active_rms > 0.25, "Low Octave em 65 Hz deve manter nivel forte sem dips: RMS = {}", active_rms);
-        assert!(ghost_rms < 1e-6, "Ruido residual detectado no anel PSOLA: RMS = {}", ghost_rms);
+        let period_out = (sr / (f0 * 0.5)).round() as usize;
+        let (mut mn, mut mx) = (f32::MAX, 0.0_f32);
+        for w in ys[3000..6500].chunks(period_out) {
+            if w.len() >= period_out {
+                let r = (w.iter().map(|v| v * v).sum::<f32>() / (w.len() as f32)).sqrt();
+                mn = mn.min(r);
+                mx = mx.max(r);
+            }
+        }
+        assert!(
+            mn > 0.5 * mx && mx > 0.15,
+            "Lacunas detectadas no PSOLA Live Low Octave 65 Hz: min={mn} max={mx}"
+        );
+
+        let ghost_rms = (silence_rms_acc / (silence_count as f32)).sqrt();
+        assert!(ghost_rms < 1e-6, "Ruido residual detectado no anel PSOLA: RMS = {ghost_rms}");
     }
 
     #[test]
-    fn test_direct_path_is_transparent_at_10khz() {
+    fn test_direct_path_is_linear_and_zero_thd_at_extreme_pan() {
         let sr = 44_100.0;
         let mut proc = super::super::DecaBuddyProcessor::new(sr);
         proc.params.direct.enabled = true;
         proc.params.direct.level_db = 0.0;
-        proc.params.direct.pan = 0.0;
+        proc.params.direct.pan = -50.0;
         for h in &mut proc.params.harmonies {
             h.enabled = false;
         }
@@ -1000,24 +1090,97 @@ mod tests {
         let mut input = vec![0.0_f32; n];
         let mut out_l = vec![0.0_f32; n];
         let mut out_r = vec![0.0_f32; n];
-        for i in 0..n {
-            input[i] = (2.0 * PI * 10_000.0 * (i as f32) / sr).sin() * 0.5;
+        for (i, item) in input.iter_mut().enumerate().take(n) {
+            *item = (2.0 * PI * 1000.0 * (i as f32) / sr).sin() * 0.90;
         }
         proc.process_block(&input, &mut out_l, &mut out_r);
 
-        // No centro (pan = 0), ganho = cos(pi/4) = 0.70710678. A soma L + R deve recuperar ~1.4142 * input
-        let mut in_sq = 0.0_f32;
-        let mut out_sq = 0.0_f32;
-        for i in 2048..n {
-            in_sq += input[i] * input[i];
-            let mono_sum = (out_l[i] + out_r[i]) * std::f32::consts::FRAC_1_SQRT_2;
-            out_sq += mono_sum * mono_sum;
+        let mut max_err = 0.0_f32;
+        for i in 2500..n {
+            max_err = max_err.max((out_l[i] - input[i]).abs());
         }
-        let gain_10k_db = 10.0 * (out_sq / in_sq).log10();
         assert!(
-            gain_10k_db.abs() < 0.05,
-            "O caminho Direct deve ser plano em 10 kHz (desvio = {:.4} dB)",
-            gain_10k_db
+            max_err < 1e-4,
+            "Caminho Direct deve ter 0% THD mesmo em pan extremo e amplitude 0.90 (erro max = {max_err})"
         );
+    }
+
+    fn estimate_f0_autocorr(sig: &[f32], sr: f32, fmin: f32, fmax: f32) -> f32 {
+        let tau_min = (sr / fmax).floor() as usize;
+        let tau_max = (sr / fmin).ceil() as usize;
+        let w = sig.len() - tau_max - 4;
+        let mut diffs = vec![0.0_f32; tau_max + 2];
+        let mut best_tau = tau_min;
+        let mut min_diff = f32::MAX;
+        for tau in (tau_min - 1)..=(tau_max + 1) {
+            let mut d = 0.0_f32;
+            for i in 0..w {
+                let diff = sig[i] - sig[i + tau];
+                d += diff * diff;
+            }
+            diffs[tau] = d;
+            if tau >= tau_min && tau <= tau_max && d < min_diff {
+                min_diff = d;
+                best_tau = tau;
+            }
+        }
+        let y0 = diffs[best_tau - 1];
+        let y1 = diffs[best_tau];
+        let y2 = diffs[best_tau + 1];
+        let den = y0 - 2.0 * y1 + y2;
+        let frac = if den.abs() > 1e-9 { 0.5 * (y0 - y2) / den } else { 0.0 };
+        sr / ((best_tau as f32) + frac.clamp(-0.5, 0.5))
+    }
+
+    #[test]
+    fn test_pitch_accuracy_within_10_cents_for_low_octave_and_high_5th() {
+        let sr = 44_100.0;
+        for &f_in in &[65.406_f32, 110.0, 220.0] {
+            for &(scale, expected_ratio) in &[
+                (super::super::scales::ScaleId::LowOctave, 0.5_f32),
+                (super::super::scales::ScaleId::High5thModal1, 1.498307_f32),
+            ] {
+                let mut proc = super::super::DecaBuddyProcessor::new(sr);
+                proc.params.key = if (f_in - 65.406).abs() < 1.0 { 0 } else { 9 };
+                proc.params.direct.enabled = false;
+                proc.params.unison.enabled = false;
+                proc.params.analog_drive = 0.0;
+                for h in &mut proc.params.harmonies {
+                    h.enabled = false;
+                }
+                proc.params.harmonies[0].enabled = true;
+                proc.params.harmonies[0].dual = false;
+                proc.params.harmonies[0].scale = scale;
+                proc.params.harmonies[0].random = 0.0;
+                proc.params.harmonies[0].quantise = 0.0;
+                proc.params.harmonies[0].formant = 0.0;
+                proc.params.harmonies[0].level_db = 0.0;
+
+                let n = 16_384;
+                let mut input = vec![0.0_f32; n];
+                let mut out_l = vec![0.0_f32; n];
+                let mut out_r = vec![0.0_f32; n];
+                for (i, item) in input.iter_mut().enumerate().take(n) {
+                    let t = (i as f32) / sr;
+                    *item = (0.7 * (2.0 * PI * f_in * t).sin()
+                        + 0.2 * (2.0 * PI * 2.0 * f_in * t).sin())
+                        * 0.6;
+                }
+                proc.process_block(&input, &mut out_l, &mut out_r);
+
+                let expected_f0 = f_in * expected_ratio;
+                let measured_f0 = estimate_f0_autocorr(
+                    &out_l[8192..15_000],
+                    sr,
+                    expected_f0 * 0.85,
+                    expected_f0 * 1.18,
+                );
+                let cents_err = 1200.0 * (measured_f0 / expected_f0).log2();
+                assert!(
+                    cents_err.abs() <= 10.0,
+                    "Erro de pitch excedeu +-10 cents para f_in={f_in} Hz ({scale:?}): esperado={expected_f0:.2} Hz, medido={measured_f0:.2} Hz ({cents_err:.2} cents)"
+                );
+            }
+        }
     }
 }

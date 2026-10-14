@@ -1,4 +1,4 @@
-//! Tabelas de escalas (HARMONYDATA.cpp) extraidas da DecaBuddy.dll.
+//! 37 Chromatic Harmony Scale Lookup Tables.
 
 pub const USER_NONE: i8 = i8::MIN;
 

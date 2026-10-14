@@ -1,13 +1,13 @@
-//! Akai DecaBuddy v1.02 & HV10 — Nucleo do Plugin e Processador de Audio/MIDI.
+//! ChorusVox DecaBuddy — Nucleo do Plugin e Processador de Audio/MIDI.
 
 pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr, lookahead_samples_for_sr,
-    max_grain_for_sr, out_delay_for_sr, pan50_to_gains, soft_saturate, voice_db_to_lin,
-    BiquadLowpass, ChoirAnalogBus, HarmonyChannelDsp, PitchTracker, PsolaSubVoice,
-    ScopedFtzDaz, SibilanceDetector, RING_MASK, RING_SIZE,
+    analog_bus_soft_limit, gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr,
+    lookahead_samples_for_sr, max_grain_for_sr, out_delay_for_sr, pan50_to_gains, voice_db_to_lin,
+    BiquadLowpass, ChoirAnalogBus, HarmonyChannelDsp, PitchTracker, PsolaSubVoice, ScopedFtzDaz,
+    SibilanceDetector, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -109,30 +109,51 @@ pub struct HarmonyVoiceParams {
 
 impl Default for HarmonyVoiceParams {
     fn default() -> Self {
-        Self { enabled: true, dual: false, scale: ScaleId::Unison, random: 25.0, formant: 0.0, quantise: 30.0, level_db: -6.0, pan: 0.0 }
+        Self { enabled: true, dual: false, scale: ScaleId::Unison, random: 0.0, formant: 0.0, quantise: 30.0, level_db: -6.0, pan: 0.0 }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct DecaBuddyParams {
-    pub bypass: bool, pub live_mode: bool, pub link: bool, pub preset: i8, pub key: u8,
-    pub midi_base_channel: u8, pub midi_mode: MidiHarmonyMode, pub tune_hz: f32,
-    pub input_gain_db: f32, pub preset_hotkey: u8, pub master_level_db: f32,
-    pub direct: DirectParams, pub unison: UnisonParams, pub harmonies: [HarmonyVoiceParams; 4],
+    pub bypass: bool,
+    pub live_mode: bool,
+    pub link: bool,
+    pub preset: i8,
+    pub key: u8,
+    pub midi_base_channel: u8,
+    pub midi_mode: MidiHarmonyMode,
+    pub tune_hz: f32,
+    pub input_gain_db: f32,
+    pub analog_drive: f32,
+    pub preset_hotkey: u8,
+    pub master_level_db: f32,
+    pub direct: DirectParams,
+    pub unison: UnisonParams,
+    pub harmonies: [HarmonyVoiceParams; 4],
 }
 
 impl Default for DecaBuddyParams {
     fn default() -> Self {
         Self {
-            bypass: false, live_mode: true, link: false, preset: -1, key: 0,
-            midi_base_channel: 1, midi_mode: MidiHarmonyMode::AutoChordOrMultiCh,
-            tune_hz: 440.0, input_gain_db: 0.0, preset_hotkey: 0, master_level_db: 0.0,
-            direct: DirectParams::default(), unison: UnisonParams::default(),
+            bypass: false,
+            live_mode: true,
+            link: false,
+            preset: -1,
+            key: 0,
+            midi_base_channel: 1,
+            midi_mode: MidiHarmonyMode::AutoChordOrMultiCh,
+            tune_hz: 440.0,
+            input_gain_db: 0.0,
+            analog_drive: 35.0,
+            preset_hotkey: 0,
+            master_level_db: 0.0,
+            direct: DirectParams::default(),
+            unison: UnisonParams::default(),
             harmonies: [
-                HarmonyVoiceParams { enabled: true, dual: false, scale: ScaleId::LowOctave, random: 25.0, formant: -15.0, quantise: 35.0, level_db: -6.0, pan: -30.0 },
-                HarmonyVoiceParams { enabled: false, dual: false, scale: ScaleId::Unison, random: 20.0, formant: 0.0, quantise: 25.0, level_db: -8.0, pan: 10.0 },
-                HarmonyVoiceParams { enabled: true, dual: true, scale: ScaleId::High3rdModal1, random: 35.0, formant: 10.0, quantise: 35.0, level_db: -7.0, pan: 25.0 },
-                HarmonyVoiceParams { enabled: true, dual: true, scale: ScaleId::High5thModal1, random: 35.0, formant: 18.0, quantise: 35.0, level_db: -8.0, pan: -20.0 },
+                HarmonyVoiceParams { enabled: true, dual: false, scale: ScaleId::LowOctave, random: 0.0, formant: -15.0, quantise: 35.0, level_db: -6.0, pan: -30.0 },
+                HarmonyVoiceParams { enabled: false, dual: false, scale: ScaleId::Unison, random: 0.0, formant: 0.0, quantise: 25.0, level_db: -8.0, pan: 10.0 },
+                HarmonyVoiceParams { enabled: true, dual: true, scale: ScaleId::High3rdModal1, random: 0.0, formant: 10.0, quantise: 35.0, level_db: -7.0, pan: 25.0 },
+                HarmonyVoiceParams { enabled: true, dual: true, scale: ScaleId::High5thModal1, random: 0.0, formant: 18.0, quantise: 35.0, level_db: -8.0, pan: -20.0 },
             ],
         }
     }
@@ -580,8 +601,8 @@ impl DecaBuddyProcessor {
                     sorted[..len].copy_from_slice(&self.chord_notes_fifo[..len]);
                     sorted[..len].sort_unstable();
                     self.midi_target_note = [None; 4];
-                    for k in 0..num_active {
-                        self.midi_target_note[active_voices[k]] = Some(sorted[k]);
+                    for (k, &voice_idx) in active_voices.iter().enumerate().take(num_active) {
+                        self.midi_target_note[voice_idx] = Some(sorted[k]);
                     }
                 } else {
                     self.midi_target_note = [None; 4];
@@ -589,9 +610,9 @@ impl DecaBuddyProcessor {
             }
             MidiHarmonyMode::Priority => {
                 self.midi_target_note = [None; 4];
-                for k in 0..num_active {
+                for (k, &voice_idx) in active_voices.iter().enumerate().take(num_active) {
                     if k < self.chord_notes_len {
-                        self.midi_target_note[active_voices[k]] = Some(self.chord_notes_fifo[k]);
+                        self.midi_target_note[voice_idx] = Some(self.chord_notes_fifo[k]);
                     }
                 }
             }
@@ -607,6 +628,7 @@ impl DecaBuddyProcessor {
         self.refresh_midi_targets();
 
         let in_gain = gain_db_to_lin(self.params.input_gain_db);
+        let drive_norm = (self.params.analog_drive * 0.01).clamp(0.0, 1.0);
         let target_master_gain = if self.params.bypass { 1.0 } else { voice_db_to_lin(self.params.master_level_db) };
 
         let live_low_lat = self.is_live_low_latency();
@@ -646,7 +668,7 @@ impl DecaBuddyProcessor {
         }; 4];
 
         let mut num_active_voices = if self.params.unison.enabled { 1usize } else { 0usize };
-        for v_idx in 0..4 {
+        for (v_idx, pv_slot) in pre_voices.iter_mut().enumerate() {
             let mut vp = self.params.harmonies[v_idx];
             if self.params.link && v_idx > 0 {
                 let h0 = self.params.harmonies[0];
@@ -661,7 +683,7 @@ impl DecaBuddyProcessor {
             let base_delay_ms = (v_idx as f32 + 1.0) * 4.5 * rand_norm;
             let effective_gain = if vp.dual { raw_gain * 0.75 } else { raw_gain };
 
-            pre_voices[v_idx] = PreVoice {
+            *pv_slot = PreVoice {
                 enabled: vp.enabled, dual: vp.dual, target_gain: effective_gain,
                 target_gl: gl, target_gr: gr, d_gl, d_gr,
                 dual_formant_ratio, rand_norm, base_delay_ms,
@@ -669,7 +691,6 @@ impl DecaBuddyProcessor {
         }
 
         for i in 0..n {
-            // Entrada limpa e transparente (resposta plana 20 Hz - 20 kHz para o Direct e YIN)
             let x = input_mono[i] * in_gain;
 
             let abs_x = x.abs();
@@ -686,7 +707,6 @@ impl DecaBuddyProcessor {
             let sib = self.sibilance_det.step(x, lp_x);
             self.sib_ring[w_idx] = sib;
 
-            // Time-Slicing sincrono deterministico do YIN
             let was_voiced = self.pitch.voiced;
             if self.hop_counter == 0 {
                 self.pitch.begin_sliced_frame(&self.dry_ring, self.write_pos, self.sample_rate);
@@ -743,6 +763,7 @@ impl DecaBuddyProcessor {
             let emit_pos = read_pos.wrapping_sub(active_out_delay);
             let emit_mask = self.mask_ring[emit_pos & RING_MASK];
             let emit_sib = self.sib_ring[emit_pos & RING_MASK];
+            let current_sag = self.choir_bus.sag_env;
 
             let dry_signal = if live_low_lat { x } else { self.dry_ring[emit_pos & RING_MASK] };
 
@@ -758,11 +779,9 @@ impl DecaBuddyProcessor {
 
             self.master_gain_smooth = 0.995 * self.master_gain_smooth + 0.005 * target_master_gain;
 
-            // Sinal Direct 100% puro e transparente
             let dir_l = dry_signal * (self.dir_gain_smooth * self.dir_gl_smooth);
             let dir_r = dry_signal * (self.dir_gain_smooth * self.dir_gr_smooth);
 
-            // Barramento exclusivo das harmonias (Wet Choir Bus)
             let mut choir_l = 0.0_f32;
             let mut choir_r = 0.0_f32;
 
@@ -770,7 +789,7 @@ impl DecaBuddyProcessor {
             if uni_active {
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample_with_cache(
-                    &self.dry_ring, &self.hann_lut, None, emit_sib,
+                    &self.dry_ring, &self.hann_lut, None, emit_sib, current_sag,
                     self.write_pos, read_pos, emit_pos, self.latest_mark,
                     self.voiced_env, emit_mask, self.pitch.current_f0,
                     self.cached_uni_ratio, uni_formant_ratio, uni_rand_norm,
@@ -783,8 +802,7 @@ impl DecaBuddyProcessor {
                 self.uni_was_active = false;
             }
 
-            for v_idx in 0..4 {
-                let pv = pre_voices[v_idx];
+            for (v_idx, &pv) in pre_voices.iter().enumerate() {
                 let s = &mut self.harmony_slew[v_idx];
 
                 let target_voice_gain = if pv.enabled && self.pitch.voiced && self.pitch.current_note >= 0 {
@@ -812,7 +830,7 @@ impl DecaBuddyProcessor {
                 let y_main = ch_dsp.main.step_sample_with_cache(
                     &self.dry_ring, &self.hann_lut,
                     if pv.dual { Some(&mut ch_dsp.shared_grain) } else { None },
-                    emit_sib,
+                    emit_sib, current_sag,
                     self.write_pos, read_pos, emit_pos, self.latest_mark,
                     self.voiced_env, emit_mask, self.pitch.current_f0,
                     pitch_ratio, formant_ratio, pv.rand_norm,
@@ -823,7 +841,7 @@ impl DecaBuddyProcessor {
                     let y_dual = ch_dsp.dual.step_sample_with_cache(
                         &self.dry_ring, &self.hann_lut,
                         Some(&mut ch_dsp.shared_grain),
-                        emit_sib,
+                        emit_sib, current_sag,
                         self.write_pos, read_pos, emit_pos, self.latest_mark,
                         self.voiced_env, emit_mask, self.pitch.current_f0,
                         pitch_ratio, pv.dual_formant_ratio, pv.rand_norm,
@@ -837,15 +855,14 @@ impl DecaBuddyProcessor {
                 }
             }
 
-            // Aplica a modelagem analogica HV10 / Ariwa exclusivamente no Choir Bus
             let (analog_choir_l, analog_choir_r) = if num_active_voices > 0 {
-                self.choir_bus.process_stereo(choir_l, choir_r, num_active_voices)
+                self.choir_bus.process_stereo(choir_l, choir_r, drive_norm, num_active_voices)
             } else {
                 (0.0, 0.0)
             };
 
-            out_l[i] = soft_saturate((dir_l + analog_choir_l) * self.master_gain_smooth);
-            out_r[i] = soft_saturate((dir_r + analog_choir_r) * self.master_gain_smooth);
+            out_l[i] = analog_bus_soft_limit((dir_l + analog_choir_l) * self.master_gain_smooth);
+            out_r[i] = analog_bus_soft_limit((dir_r + analog_choir_r) * self.master_gain_smooth);
 
             self.write_pos = self.write_pos.wrapping_add(1);
         }
@@ -1019,7 +1036,7 @@ pub mod truce_integration {
         #[param(name = "MIDI Ch", range = "linear(1, 16)", default = 1)] pub midi_ch: IntParam,
         #[param(name = "Tune", range = "linear(427, 453)", default = 440.0, unit = "Hz")] pub tune: FloatParam,
         #[param(name = "In Gain", range = "linear(-15, 15)", default = 0.0, unit = "dB")] pub input_gain: FloatParam,
-        #[param(name = "Live", default = true)] pub live_mode: BoolParam,
+        #[param(name = "Drive", range = "linear(0, 100)", default = 35.0, unit = "%")] pub analog_drive: FloatParam,
         #[param(name = "Link", default = false)] pub link: BoolParam,
 
         #[param(name = "Direct", default = true)] pub direct_on: BoolParam,
@@ -1036,7 +1053,7 @@ pub mod truce_integration {
         #[param(name = "H1 Scale", default = 2)] pub h1_scale: EnumParam<ScaleChoice>,
         #[param(name = "H1 On", default = true)] pub h1_on: BoolParam,
         #[param(name = "H1 Dual", default = false)] pub h1_dual: BoolParam,
-        #[param(name = "H1 Rand", range = "linear(0, 100)", default = 25.0)] pub h1_random: FloatParam,
+        #[param(name = "H1 Rand", range = "linear(0, 100)", default = 0.0)] pub h1_random: FloatParam,
         #[param(name = "H1 Form", range = "linear(-50, 50)", default = -15.0)] pub h1_formant: FloatParam,
         #[param(name = "H1 Quant", range = "linear(0, 100)", default = 35.0)] pub h1_quantise: FloatParam,
         #[param(name = "H1 Level", range = "linear(-24, 0)", default = -6.0, unit = "dB")] pub h1_level: FloatParam,
@@ -1045,7 +1062,7 @@ pub mod truce_integration {
         #[param(name = "H2 Scale", default = 19)] pub h2_scale: EnumParam<ScaleChoice>,
         #[param(name = "H2 On", default = false)] pub h2_on: BoolParam,
         #[param(name = "H2 Dual", default = false)] pub h2_dual: BoolParam,
-        #[param(name = "H2 Rand", range = "linear(0, 100)", default = 20.0)] pub h2_random: FloatParam,
+        #[param(name = "H2 Rand", range = "linear(0, 100)", default = 0.0)] pub h2_random: FloatParam,
         #[param(name = "H2 Form", range = "linear(-50, 50)", default = 0.0)] pub h2_formant: FloatParam,
         #[param(name = "H2 Quant", range = "linear(0, 100)", default = 25.0)] pub h2_quantise: FloatParam,
         #[param(name = "H2 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")] pub h2_level: FloatParam,
@@ -1054,7 +1071,7 @@ pub mod truce_integration {
         #[param(name = "H3 Scale", default = 20)] pub h3_scale: EnumParam<ScaleChoice>,
         #[param(name = "H3 On", default = true)] pub h3_on: BoolParam,
         #[param(name = "H3 Dual", default = true)] pub h3_dual: BoolParam,
-        #[param(name = "H3 Rand", range = "linear(0, 100)", default = 35.0)] pub h3_random: FloatParam,
+        #[param(name = "H3 Rand", range = "linear(0, 100)", default = 0.0)] pub h3_random: FloatParam,
         #[param(name = "H3 Form", range = "linear(-50, 50)", default = 10.0)] pub h3_formant: FloatParam,
         #[param(name = "H3 Quant", range = "linear(0, 100)", default = 35.0)] pub h3_quantise: FloatParam,
         #[param(name = "H3 Level", range = "linear(-24, 0)", default = -7.0, unit = "dB")] pub h3_level: FloatParam,
@@ -1063,7 +1080,7 @@ pub mod truce_integration {
         #[param(name = "H4 Scale", default = 27)] pub h4_scale: EnumParam<ScaleChoice>,
         #[param(name = "H4 On", default = true)] pub h4_on: BoolParam,
         #[param(name = "H4 Dual", default = true)] pub h4_dual: BoolParam,
-        #[param(name = "H4 Rand", range = "linear(0, 100)", default = 35.0)] pub h4_random: FloatParam,
+        #[param(name = "H4 Rand", range = "linear(0, 100)", default = 0.0)] pub h4_random: FloatParam,
         #[param(name = "H4 Form", range = "linear(-50, 50)", default = 18.0)] pub h4_formant: FloatParam,
         #[param(name = "H4 Quant", range = "linear(0, 100)", default = 35.0)] pub h4_quantise: FloatParam,
         #[param(name = "H4 Level", range = "linear(-24, 0)", default = -8.0, unit = "dB")] pub h4_level: FloatParam,
@@ -1105,7 +1122,9 @@ pub mod truce_integration {
         }
 
         fn reset(state: &mut Self::DspState, _params: &Self::Params, config: &AudioConfig) {
-            state.core.host_offline = config.process_mode.is_offline();
+            let is_off = config.process_mode.is_offline();
+            state.core.host_offline = is_off;
+            state.core.params.live_mode = !is_off;
             state.core.set_sample_rate(config.sample_rate as f32);
             let max_blk = config.max_block_size.max(4096);
             state.mono_scratch.resize(max_blk, 0.0);
@@ -1134,7 +1153,7 @@ pub mod truce_integration {
             p.midi_base_channel = params.midi_ch.value() as u8;
             p.tune_hz = params.tune.read();
             p.input_gain_db = params.input_gain.read();
-            p.live_mode = params.live_mode.value();
+            p.analog_drive = params.analog_drive.read();
             p.link = params.link.value();
 
             p.direct.enabled = params.direct_on.value();
@@ -1256,7 +1275,7 @@ pub mod truce_integration {
                 section("GLOBAL & INPUT -----------------------------------------------------------------------------------------------------------------------", vec![
                     dropdown(P::Key, "Key").cols(2), dropdown(P::MidiMode, "MIDI Mode").cols(2),
                     knob(P::MidiCh, "MIDI Ch"), knob(P::Tune, "Tune Hz").cols(2),
-                    knob(P::InputGain, "In Gain").cols(2), toggle(P::LiveMode, "Live"),
+                    knob(P::InputGain, "In Gain").cols(2), knob(P::AnalogDrive, "Drive"),
                     meter(&[P::MeterIn], "In"),
                 ]),
                 section("DIRECT & UNISON ----------------------------------------------------------------------------------------------------------------------", vec![
@@ -1292,7 +1311,7 @@ pub mod truce_integration {
                     knob(P::H4Level, "Level"), knob(P::H4Pan, "Pan"),
                 ]),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.10")
+            .with_title("CHORUSVOX DECABUDDY v0.2.11")
             .into_editor(&params)
         }
     }
@@ -1305,13 +1324,15 @@ mod jazz_and_live_tests {
     use super::*;
 
     #[test]
-    fn test_live_vs_studio_latency_and_offline_bounce() {
+    fn test_auto_live_vs_offline_bounce_latency_and_default_zero_random() {
         let mut proc = DecaBuddyProcessor::new(44_100.0);
-        proc.params.live_mode = true;
-        proc.host_offline = false;
-        assert_eq!(proc.latency_samples(), 0);
+        assert_eq!(proc.params.unison.random, 0.0, "U.Rand deve abrir em 0.0 por padrao");
+        for h in &proc.params.harmonies {
+            assert_eq!(h.random, 0.0, "Random das harmonias deve abrir em 0.0 por padrao");
+        }
+        assert_eq!(proc.latency_samples(), 0, "Em tempo real deve operar em modo Live (0 amostras reportadas)");
         proc.host_offline = true;
-        assert!(proc.latency_samples() > 2000);
+        assert_eq!(proc.latency_samples(), 2496, "Em Bounce offline deve reportar 2496 amostras para PDC");
     }
 
     #[test]

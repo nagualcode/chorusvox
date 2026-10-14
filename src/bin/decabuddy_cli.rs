@@ -95,7 +95,7 @@ fn synth_formant_voice(sr: f32) -> Vec<f32> {
             for r in &mut res { sig = r.process(sig); }
 
             let attack = (t / 0.03).min(1.0);
-            let release = ((dur - t) / 0.06).min(1.0).max(0.0);
+            let release = ((dur - t) / 0.06).clamp(0.0, 1.0);
             out.push(sig * attack * release);
         }
     }
