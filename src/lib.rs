@@ -4,9 +4,9 @@ pub mod dsp;
 pub mod scales;
 
 use dsp::{
-    akai_input_stage_2sc3330, gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr,
+    akai_clean_warmth, gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr,
     lookahead_samples_for_sr, max_grain_for_sr, out_delay_for_sr, pan50_to_gains,
-    voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp, Njm4558Stage, PitchTracker,
+    soft_saturate, voice_db_to_lin, BiquadLowpass, HarmonyChannelDsp, PitchTracker,
     PsolaSubVoice, PCM3003_RECON_LP_HZ, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
@@ -310,14 +310,10 @@ pub struct DecaBuddyProcessor {
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
 
-    input_opamp_ic12: Njm4558Stage,
-    output_opamp_l_ic13: Njm4558Stage,
-    output_opamp_r_ic14: Njm4558Stage,
     pcm3003_recon_l: BiquadLowpass,
     pcm3003_recon_r: BiquadLowpass,
     nju7032_env: f32,
-    njm4558_max_slew: f32,
-    njm4558_bw_alpha: f32,
+    prev_live_low_lat: bool,
 
     latest_mark: usize,
     voiced_env: f32,
@@ -325,7 +321,6 @@ pub struct DecaBuddyProcessor {
     unison_dsp: PsolaSubVoice,
     harmony_dsp: [HarmonyChannelDsp; 4],
 
-    // Estado MIDI modernizado (Sustain CC64 + Voice Leading Memory)
     midi_target_note: [Option<u8>; 4],
     channel_note: [Option<u8>; 4],
     chord_notes_fifo: [u8; 16],
@@ -376,13 +371,10 @@ impl DecaBuddyProcessor {
         let live_lookahead = live_lookahead_for_sr(sr);
         let live_out_delay = live_out_delay_for_sr(sr);
         let min_t0 = ((20.0 * (sr / 44_100.0)).round() as usize).max(2);
-        let max_t0 = ((1050.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
+        let max_t0 = ((980.0 * (sr / 44_100.0)).round() as usize).clamp(min_t0 + 1, max_grain / 2);
 
         let init_write = lookahead * 2 + out_delay;
         let default_params = DecaBuddyParams::default();
-
-        let njm4558_max_slew = (0.58 * (44_100.0 / sr)).clamp(0.08, 0.85);
-        let njm4558_bw_alpha = (-2.0 * std::f32::consts::PI * 18_500.0_f32.min(sr * 0.45) / sr).exp();
 
         Self {
             sample_rate: sr,
@@ -404,14 +396,10 @@ impl DecaBuddyProcessor {
             hop_counter: 0,
             lp_filter: lp,
             pitch,
-            input_opamp_ic12: Njm4558Stage::default(),
-            output_opamp_l_ic13: Njm4558Stage::default(),
-            output_opamp_r_ic14: Njm4558Stage::default(),
             pcm3003_recon_l: recon_l,
             pcm3003_recon_r: recon_r,
             nju7032_env: 0.0,
-            njm4558_max_slew,
-            njm4558_bw_alpha,
+            prev_live_low_lat: true,
             latest_mark: init_write.wrapping_sub(lookahead),
             voiced_env: 0.0,
             unison_dsp: PsolaSubVoice::new(101).with_dual_warmth(),
@@ -471,16 +459,13 @@ impl DecaBuddyProcessor {
         self.pcm3003_recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sample_rate);
         self.pitch.set_sample_rate(self.sample_rate);
 
-        self.njm4558_max_slew = (0.58 * (44_100.0 / self.sample_rate)).clamp(0.08, 0.85);
-        self.njm4558_bw_alpha = (-2.0 * std::f32::consts::PI * 18_500.0_f32.min(self.sample_rate * 0.45) / self.sample_rate).exp();
-
         self.max_grain = max_grain_for_sr(self.sample_rate);
         self.lookahead = lookahead_samples_for_sr(self.sample_rate);
         self.out_delay = out_delay_for_sr(self.sample_rate);
         self.live_lookahead = live_lookahead_for_sr(self.sample_rate);
         self.live_out_delay = live_out_delay_for_sr(self.sample_rate);
         self.min_t0 = ((20.0 * (self.sample_rate / 44_100.0)).round() as usize).max(2);
-        self.max_t0 = ((1050.0 * (self.sample_rate / 44_100.0)).round() as usize)
+        self.max_t0 = ((980.0 * (self.sample_rate / 44_100.0)).round() as usize)
             .clamp(self.min_t0 + 1, self.max_grain / 2);
 
         self.reset();
@@ -491,9 +476,6 @@ impl DecaBuddyProcessor {
         self.lp_ring.fill(0.0);
         self.mask_ring.fill(0.0);
         self.pitch.reset();
-        self.input_opamp_ic12.reset();
-        self.output_opamp_l_ic13.reset();
-        self.output_opamp_r_ic14.reset();
         self.pcm3003_recon_l.reset();
         self.pcm3003_recon_r.reset();
         self.nju7032_env = 0.0;
@@ -848,6 +830,14 @@ impl DecaBuddyProcessor {
         };
 
         let live_low_lat = self.is_live_low_latency();
+        if live_low_lat != self.prev_live_low_lat {
+            self.prev_live_low_lat = live_low_lat;
+            self.unison_dsp.reset();
+            for h in &mut self.harmony_dsp {
+                h.reset();
+            }
+        }
+
         let active_lookahead = if live_low_lat { self.live_lookahead } else { self.lookahead };
         let active_out_delay = if live_low_lat { self.live_out_delay } else { self.out_delay };
         let yin_hop = self.pitch.yin_hop;
@@ -932,12 +922,9 @@ impl DecaBuddyProcessor {
             };
         }
 
-        let max_slew = self.njm4558_max_slew;
-        let bw_alpha = self.njm4558_bw_alpha;
-
         for i in 0..n {
-            let pre_bjt = akai_input_stage_2sc3330(input_mono[i] * in_gain);
-            let x = self.input_opamp_ic12.process(pre_bjt, max_slew, bw_alpha);
+            // Saturacao analogica 100% simetrica (zero DC offset nos graos PSOLA)
+            let x = akai_clean_warmth(input_mono[i] * in_gain);
 
             let abs_x = x.abs();
             if abs_x > self.nju7032_env {
@@ -962,7 +949,7 @@ impl DecaBuddyProcessor {
                     self.params.tune_hz,
                 );
                 if self.pitch.voiced {
-                    let cutoff = (self.pitch.current_f0 * 1.85).clamp(163.64, 950.0);
+                    let cutoff = (self.pitch.current_f0 * 2.1).clamp(220.0, 1200.0);
                     self.lp_filter.set_cutoff(cutoff, self.sample_rate);
 
                     let uni_q_norm = (self.params.unison.quantise * 0.01).clamp(0.0, 1.0);
@@ -1037,7 +1024,6 @@ impl DecaBuddyProcessor {
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample(
                     &self.dry_ring,
-                    &self.lp_ring,
                     &self.hann_lut,
                     self.write_pos,
                     read_pos,
@@ -1091,7 +1077,6 @@ impl DecaBuddyProcessor {
 
                 let y_main = self.harmony_dsp[v_idx].main.step_sample(
                     &self.dry_ring,
-                    &self.lp_ring,
                     &self.hann_lut,
                     self.write_pos,
                     read_pos,
@@ -1113,7 +1098,6 @@ impl DecaBuddyProcessor {
                 if pv.dual {
                     let y_dual = self.harmony_dsp[v_idx].dual.step_sample(
                         &self.dry_ring,
-                        &self.lp_ring,
                         &self.hann_lut,
                         self.write_pos,
                         read_pos,
@@ -1141,8 +1125,8 @@ impl DecaBuddyProcessor {
 
             let recon_l = self.pcm3003_recon_l.process(mix_l * self.master_gain_smooth);
             let recon_r = self.pcm3003_recon_r.process(mix_r * self.master_gain_smooth);
-            out_l[i] = self.output_opamp_l_ic13.process(recon_l, max_slew, bw_alpha);
-            out_r[i] = self.output_opamp_r_ic14.process(recon_r, max_slew, bw_alpha);
+            out_l[i] = soft_saturate(recon_l);
+            out_r[i] = soft_saturate(recon_r);
 
             self.write_pos = self.write_pos.wrapping_add(1);
         }
@@ -1154,7 +1138,7 @@ impl DecaBuddyProcessor {
 
     #[inline]
     fn update_epoch_marks(&mut self, read_pos: usize) {
-        if !self.pitch.voiced || self.pitch.current_f0 <= 38.0 {
+        if !self.pitch.voiced || self.pitch.current_f0 <= 40.0 {
             self.latest_mark = read_pos;
             return;
         }
@@ -1641,12 +1625,11 @@ pub mod truce_integration {
             ProcessStatus::Normal
         }
 
-        /// Interface vertical com largura de 11 colunas equalizada em todas as faixas,
-        /// garantindo que 'VOX 1..4 --------' encoste na margem esquerda antes do botao On.
+        /// Cabecalhos de 134 caracteres para alinhar o inicio de 'VOX 1..4' na margem esquerda.
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             GridLayout::build(vec![
                 section(
-                    "GLOBAL & INPUT --------------------------------------------------------------------------------------------",
+                    "GLOBAL & INPUT -----------------------------------------------------------------------------------------------------------------------",
                     vec![
                         dropdown(P::Key, "Key").cols(2),
                         dropdown(P::MidiMode, "MIDI Mode").cols(2),
@@ -1658,7 +1641,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "DIRECT & UNISON -------------------------------------------------------------------------------------------",
+                    "DIRECT & UNISON ----------------------------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::DirectOn, "Direct"),
                         knob(P::DirectLevel, "Dir Lev"),
@@ -1674,7 +1657,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 1 -----------------------------------------------------------------------------------------------------",
+                    "VOX 1 --------------------------------------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H1On, "On"),
                         toggle(P::H1Dual, "Dual"),
@@ -1687,7 +1670,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 2 -----------------------------------------------------------------------------------------------------",
+                    "VOX 2 --------------------------------------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H2On, "On"),
                         toggle(P::H2Dual, "Dual"),
@@ -1700,7 +1683,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 3 -----------------------------------------------------------------------------------------------------",
+                    "VOX 3 --------------------------------------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H3On, "On"),
                         toggle(P::H3Dual, "Dual"),
@@ -1713,7 +1696,7 @@ pub mod truce_integration {
                     ],
                 ),
                 section(
-                    "VOX 4 -----------------------------------------------------------------------------------------------------",
+                    "VOX 4 --------------------------------------------------------------------------------------------------------------------------------",
                     vec![
                         toggle(P::H4On, "On"),
                         toggle(P::H4Dual, "Dual"),
@@ -1726,7 +1709,7 @@ pub mod truce_integration {
                     ],
                 ),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.6")
+            .with_title("CHORUSVOX DECABUDDY v0.2.7")
             .into_editor(&params)
         }
     }
@@ -1761,27 +1744,22 @@ mod jazz_and_live_tests {
             h.enabled = true;
         }
 
-        // Pressiona Pedal de Sustain (CC 64 = 127)
         proc.handle_midi_event(0xB0, 64, 127);
 
-        // Toca acorde Dmaj7 arpejado (D4=62, F#4=66, A4=69, C#5=73) e solta as teclas fisicas
         for &n in &[62u8, 66, 69, 73] {
             proc.handle_midi_event(0x90, n, 100);
             proc.handle_midi_event(0x80, n, 0);
         }
         assert_eq!(proc.chord_notes_len, 4, "Pedal de sustain deve reter as 4 notas do Dmaj7");
 
-        // Canta nota D4 (62): verifica que nenhuma voz gera b2/b9 clash (1 semitom = C#4 a -1 st)
         for v in 0..4 {
             let shift = proc.flexichord_jazz_shift(v, 62).expect("Deve gerar intervalo para Dmaj7");
             assert!(shift.abs() >= 2, "Anti-clash deve impedir intervalo de 1 semitom: shift={}", shift);
         }
 
-        // Toca novo acorde F#m6 segurando as teclas fisicas (F#4=66, A4=69, C#5=73, D#5=75)
         for &n in &[66u8, 69, 73, 75] {
             proc.handle_midi_event(0x90, n, 100);
         }
-        // Levanta o pedal de sustain: D4 (62) que estava apenas no pedal sai, ficando F#m6 (4 notas)
         proc.handle_midi_event(0xB0, 64, 0);
         assert_eq!(proc.chord_notes_len, 4, "F#m6 fisicamente seguro permanece ativo com 4 notas");
     }

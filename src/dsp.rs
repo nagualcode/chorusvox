@@ -1,9 +1,9 @@
-//! Motor DSP e Modelagem de Hardware do ChorusVox / Akai HV10 DecaBuddy.
-//! - Transistores discretos 2SC3330 (TR1-TR3) + Diodos de silicio 1SS133T-77 (D1-D4).
-//! - Op-Amps JRC NJM4558L (IC12, IC13, IC14, IC402) com slew-rate limiting e rail de 9V DC.
-//! - DSP Analog Devices ADSP-2186MKST-300 (IC1): quantizacao 16-bit Q15 + dither TPDF e MAC 40-bit.
-//! - Codec Burr-Brown PCM3003E (IC3) + Filtros de reconstrucao e subsonico de 32.7848 Hz.
-//! - Modos Live (baixa latencia causal) vs Studio/Bounce (lookahead completo).
+//! Motor DSP do ChorusVox / Akai HV10 DecaBuddy (Livre de Ruido e Dither).
+//! - Extracao de grao de banda unica 100% coerente em fase (zero cancelamento dry - lp).
+//! - Trava invariante max_l_out < 2 * out_delay: nenhum grao escreve atras de emit_pos.
+//! - Confinamento suave no dominio da fonte (|src_off| < ta) + NOLA raw_w.max(0.35).
+//! - Saturacao analogica 100% simetrica (zero DC offset) + filtros suaves Akai HV10
+//!   (32.7848 Hz subsonico, 12.8317 kHz DAC LP, 8.5 kHz Dual Warmth e 16.8 kHz PCM3003E).
 
 use std::f32::consts::PI;
 
@@ -12,6 +12,7 @@ pub const RING_MASK: usize = RING_SIZE - 1;
 pub const DELAY_SIZE: usize = 16384;
 pub const DELAY_MASK: usize = DELAY_SIZE - 1;
 pub const HANN_LUT_SIZE: usize = 2048;
+pub const PSOLA_SYNTH_WINDOW_FACTOR: f32 = 1.35;
 
 pub const AKAI_SUBSONIC_HP_HZ: f32 = 32.784804;
 pub const AKAI_DAC_LP_HZ: f32 = 12831.712823;
@@ -23,27 +24,28 @@ const OU_ONE_MINUS_A_TIMES_K: f32 = (1.0 - OU_A) * 346.40582;
 
 #[inline]
 pub fn max_grain_for_sr(sr: f32) -> usize {
-    ((4096.0 * (sr / 44_100.0)).round() as usize).next_power_of_two().clamp(4096, 16384)
+    ((2048.0 * (sr / 44_100.0)).round() as usize).next_power_of_two().clamp(2048, 8192)
 }
 
 #[inline]
 pub fn lookahead_samples_for_sr(sr: f32) -> usize {
-    ((2048.0 * (sr / 44_100.0)).round() as usize).clamp(1536, 8192)
+    ((1536.0 * (sr / 44_100.0)).round() as usize).clamp(1024, 8192)
 }
 
 #[inline]
 pub fn out_delay_for_sr(sr: f32) -> usize {
-    ((768.0 * (sr / 44_100.0)).round() as usize).clamp(512, 4096)
+    ((1024.0 * (sr / 44_100.0)).round() as usize).clamp(768, 4096)
 }
 
+/// Janela Live: Direct em 0 ms e harmonias com 512 amostras de margem segura sem truncar graos
 #[inline]
 pub fn live_lookahead_for_sr(sr: f32) -> usize {
-    ((256.0 * (sr / 44_100.0)).round() as usize).clamp(128, 1024)
+    ((512.0 * (sr / 44_100.0)).round() as usize).clamp(384, 2048)
 }
 
 #[inline]
 pub fn live_out_delay_for_sr(sr: f32) -> usize {
-    ((256.0 * (sr / 44_100.0)).round() as usize).clamp(128, 1024)
+    ((512.0 * (sr / 44_100.0)).round() as usize).clamp(384, 2048)
 }
 
 #[inline]
@@ -81,45 +83,25 @@ pub fn pan50_to_gains(pan_50: f32) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
+/// Saturacao analogica 100% simetrica (zero DC offset, zero aliasing) para pre-amp e op-amps
 #[inline(always)]
-pub fn akai_input_stage_2sc3330(x: f32) -> f32 {
-    let biased = x + 0.018 * x * x;
-    let drive = biased * 1.06;
-    let d2 = drive * drive;
-    let diode_clipped = drive * (27.0 + d2) / (27.0 + 9.0 * d2);
-    diode_clipped * 0.94
+pub fn akai_clean_warmth(x: f32) -> f32 {
+    let x_clamped = x.clamp(-2.5, 2.5);
+    let x2 = x_clamped * x_clamped;
+    x_clamped * (27.0 + x2) / (27.0 + 9.0 * x2)
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Njm4558Stage {
-    prev_out: f32,
-    lp_z1: f32,
-}
-
-impl Njm4558Stage {
-    pub fn reset(&mut self) {
-        self.prev_out = 0.0;
-        self.lp_z1 = 0.0;
-    }
-
-    #[inline(always)]
-    pub fn process(&mut self, x: f32, max_slew: f32, bw_alpha: f32) -> f32 {
-        let delta = (x - self.prev_out).clamp(-max_slew, max_slew);
-        let slewed = self.prev_out + delta;
-        self.prev_out = slewed + 1e-15 - 1e-15;
-
-        let filtered = (1.0 - bw_alpha) * slewed + bw_alpha * self.lp_z1;
-        self.lp_z1 = filtered + 1e-15 - 1e-15;
-
-        if filtered > 0.76 {
-            let over = filtered - 0.76;
-            0.76 + 0.24 * (over / (1.0 + over * 1.15))
-        } else if filtered < -0.72 {
-            let under = -filtered - 0.72;
-            -(0.72 + 0.26 * (under / (1.0 + under * 1.25)))
-        } else {
-            filtered
-        }
+#[inline(always)]
+pub fn soft_saturate(x: f32) -> f32 {
+    const THRESHOLD: f32 = 0.75;
+    if x > THRESHOLD {
+        let over = x - THRESHOLD;
+        THRESHOLD + (1.0 - THRESHOLD) * (over / (1.0 + over))
+    } else if x < -THRESHOLD {
+        let under = -x - THRESHOLD;
+        -(THRESHOLD + (1.0 - THRESHOLD) * (under / (1.0 + under)))
+    } else {
+        x
     }
 }
 
@@ -254,9 +236,9 @@ impl PitchTracker {
     pub fn new(sr: f32) -> Self {
         let (yin_win, yin_hop) = yin_window_and_hop(sr);
         let mut pt = Self {
-            fmin: 42.0,
+            fmin: 45.0,
             fmax: 900.0,
-            threshold: 0.34,
+            threshold: 0.33,
             hysteresis_semi: 0.65,
             yin_win,
             yin_hop,
@@ -280,7 +262,7 @@ impl PitchTracker {
         let max_len = self.yin_win / 2;
         self.oct_bias_lut.resize(max_len, 0.0);
         for tau in tau_min..max_len {
-            self.oct_bias_lut[tau] = 0.015 * ((tau as f32) / (tau_min as f32)).log2();
+            self.oct_bias_lut[tau] = 0.018 * ((tau as f32) / (tau_min as f32)).log2();
         }
     }
 
@@ -324,7 +306,7 @@ impl PitchTracker {
             }
         }
         let rms = (sum_sq / (w as f32)).sqrt();
-        if rms < 0.0012 {
+        if rms < 0.002 {
             self.mark_unvoiced();
             return;
         }
@@ -347,7 +329,7 @@ impl PitchTracker {
         let mut best_cost = 1e9_f32;
         let prev_f0 = self.current_f0;
         let was_voiced = self.voiced && prev_f0 > 0.0;
-        let active_thresh = if was_voiced { self.threshold + 0.10 } else { self.threshold };
+        let active_thresh = if was_voiced { self.threshold + 0.08 } else { self.threshold };
 
         for tau in tau_min..tau_max {
             let c = self.cmnd[tau];
@@ -355,7 +337,7 @@ impl PitchTracker {
                 let oct_bias = self.oct_bias_lut[tau];
                 let jump_cost = if was_voiced {
                     let cand_f0 = sr_decim / (tau as f32);
-                    0.035 * (12.0 * (cand_f0 / prev_f0).log2()).abs().min(12.0)
+                    0.04 * (12.0 * (cand_f0 / prev_f0).log2()).abs().min(12.0)
                 } else {
                     0.0
                 };
@@ -403,7 +385,7 @@ impl PitchTracker {
 
     fn mark_unvoiced(&mut self) {
         self.unvoiced_hold += 1;
-        if self.unvoiced_hold >= 6 {
+        if self.unvoiced_hold >= 5 {
             self.voiced = false;
             self.current_f0 = 0.0;
             self.current_note = -1;
@@ -423,7 +405,6 @@ pub struct PsolaSubVoice {
     delay_mod_samples: f32,
     rng_pitch: FastRng,
     rng_delay: FastRng,
-    rng_dither: FastRng,
     hp_x1: f32,
     hp_y1: f32,
     dac_lp_z1: f32,
@@ -443,7 +424,6 @@ impl PsolaSubVoice {
             delay_mod_samples: 0.0,
             rng_pitch: FastRng::new(seed),
             rng_delay: FastRng::new(seed.wrapping_mul(0x85EBCA6B).wrapping_add(17)),
-            rng_dither: FastRng::new(seed.wrapping_mul(0xC2B2AE35).wrapping_add(31)),
             hp_x1: 0.0,
             hp_y1: 0.0,
             dac_lp_z1: 0.0,
@@ -474,7 +454,6 @@ impl PsolaSubVoice {
     pub fn step_sample(
         &mut self,
         dry_ring: &[f32],
-        lp_ring: &[f32],
         hann_lut: &[f32],
         write_pos: usize,
         read_pos: usize,
@@ -506,27 +485,32 @@ impl PsolaSubVoice {
             (target_delay_ms * 0.001 * sr).clamp(0.0, (DELAY_SIZE - 16) as f32);
         self.delay_mod_samples = 0.999 * self.delay_mod_samples + 0.001 * target_delay_samp;
 
-        if voiced_mask > 0.01 && f0_hz > 38.0 {
+        // Limite estrito: half_out nunca pode ultrapassar a distancia (read_pos - emit_pos)
+        let active_out_delay = read_pos.wrapping_sub(emit_pos).clamp(64, max_grain / 2);
+        let max_safe_grain = ((active_out_delay * 2).saturating_sub(8) | 1).min(max_grain - 1);
+
+        if voiced_mask > 0.01 && f0_hz > 40.0 {
             let cents_oct = (self.drift_cents + extra_cents) * (1.0 / 1200.0);
             let cents_factor = fast_exp2_small(cents_oct);
             let ratio = (pitch_ratio * cents_factor).clamp(0.25, 4.0);
-            let ta = (sr / f0_hz).clamp(20.0, (max_grain / 2 - 4) as f32);
-            let ts = (ta / ratio).clamp(12.0, (max_grain / 2 - 4) as f32);
+            let ta = (sr / f0_hz).clamp(20.0, (max_safe_grain / 2 - 4) as f32);
+            let ts = (ta / ratio).clamp(12.0, (max_safe_grain - 8) as f32);
 
             self.synth_phase -= 1.0;
             if self.synth_phase <= 0.0 {
                 self.synth_phase += ts;
-                self.splat_grain_hybrid(
+                let grain_len = ((2.0 * ta).max(PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
+                    .clamp(31, max_safe_grain);
+                self.splat_grain_clean(
                     dry_ring,
-                    lp_ring,
                     hann_lut,
                     write_pos,
                     latest_mark,
                     read_pos,
+                    grain_len,
                     ta,
-                    ts,
                     formant_ratio,
-                    max_grain,
+                    max_safe_grain,
                 );
             }
         } else {
@@ -539,15 +523,18 @@ impl PsolaSubVoice {
         self.out_ring[idx] = 0.0;
         self.w_ring[idx] = 0.0;
 
-        let wet = raw_out / raw_w.max(1.0);
+        // Normalizacao NOLA suave: evita explosao de caudas na oitava abaixo e mantem nivel constante
+        let wet = raw_out / raw_w.max(0.35);
         let dry = dry_ring[idx];
         let combined = wet * emit_mask + dry * (1.0 - emit_mask) * unvoiced_gain;
 
+        // 1. Filtro Passa-Altas Subsonico Akai HV10 (32.7848 Hz)
         let hp_r = (-2.0 * PI * AKAI_SUBSONIC_HP_HZ / sr).exp();
         let hp_out = hp_r * (self.hp_y1 + combined - self.hp_x1);
         self.hp_x1 = combined;
         self.hp_y1 = hp_out + 1e-15 - 1e-15;
 
+        // 2. Filtro Passa-Baixas de Reconstrucao DAC Akai (12.83 kHz principal / 8.5 kHz Dual Warmth)
         let lp_fc = if self.is_dual_warm { AKAI_DUAL_WARM_LP_HZ } else { AKAI_DAC_LP_HZ };
         let lp_a = (-2.0 * PI * lp_fc.min(sr * 0.45) / sr).exp();
         let dac_out = (1.0 - lp_a) * hp_out + lp_a * self.dac_lp_z1;
@@ -568,28 +555,25 @@ impl PsolaSubVoice {
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn splat_grain_hybrid(
+    fn splat_grain_clean(
         &mut self,
         dry_ring: &[f32],
-        lp_ring: &[f32],
         hann_lut: &[f32],
         write_pos: usize,
         mark_center: usize,
         out_center: usize,
+        l_base: usize,
         ta: f32,
-        ts: f32,
         formant_ratio: f32,
-        max_grain: usize,
+        max_safe_grain: usize,
     ) {
         let fr = formant_ratio.clamp(0.5, 2.0);
-        let l_formant = (2.0 * ta / fr).round();
-        let l_out = ((l_formant.max(2.0 * ts) as usize) | 1).clamp(31, max_grain - 1);
+        let l_out = (((l_base as f32) / fr).round() as usize | 1).clamp(17, max_safe_grain);
         let half_out = (l_out / 2) as isize;
 
-        let body_step = ta / (half_out.max(1) as f32);
-        let max_src_reach = ta * 0.98;
-
-        let min_dist_from_write = (ta.ceil() as usize) + 4;
+        // Alcance maximo na fonte limitado a 1.15 * ta para nunca capturar pulsos glotais vizinhos
+        let max_src_reach = (ta * 1.15).max(16.0);
+        let min_dist_from_write = (max_src_reach.ceil() as usize) + 4;
         let dist_to_write = write_pos.wrapping_sub(mark_center);
         let safe_mark = if dist_to_write < min_dist_from_write {
             write_pos.wrapping_sub(min_dist_from_write)
@@ -602,28 +586,19 @@ impl PsolaSubVoice {
 
         for k in 0..l_out {
             let offset_out = k as isize - half_out;
-            let off_f = offset_out as f32;
+            let src_off = (offset_out as f32) * fr;
 
-            let src_body = off_f * body_step;
-            let b_i0 = src_body.floor() as isize;
-            let b_frac = src_body - (b_i0 as f32);
-            let bp0 = (safe_mark as isize + b_i0) as usize & RING_MASK;
-            let bp1 = (bp0 + 1) & RING_MASK;
-            let body_val = lp_ring[bp0] + b_frac * (lp_ring[bp1] - lp_ring[bp0]);
-
-            let src_fmt = off_f * fr;
-            let fmt_val = if src_fmt.abs() < max_src_reach {
-                let f_i0 = src_fmt.floor() as isize;
-                let f_frac = src_fmt - (f_i0 as f32);
-                let fp0 = (safe_mark as isize + f_i0) as usize & RING_MASK;
-                let fp1 = (fp0 + 1) & RING_MASK;
-                let d0 = dry_ring[fp0] - lp_ring[fp0];
-                let d1 = dry_ring[fp1] - lp_ring[fp1];
-                let raw_fmt = d0 + f_frac * (d1 - d0);
-                let norm_pos = (src_fmt / max_src_reach) * 0.5 + 0.5;
-                let fmt_lut_idx = ((norm_pos * (HANN_LUT_SIZE as f32)) as usize)
-                    .min(HANN_LUT_SIZE - 1);
-                raw_fmt * hann_lut[fmt_lut_idx]
+            let sample = if src_off.abs() < max_src_reach {
+                let src_i0 = src_off.floor() as isize;
+                let frac = src_off - (src_i0 as f32);
+                let p0 = (safe_mark as isize + src_i0) as usize & RING_MASK;
+                let p1 = (p0 + 1) & RING_MASK;
+                let raw_s = dry_ring[p0] + frac * (dry_ring[p1] - dry_ring[p0]);
+                // Taper suave nas bordas de +-max_src_reach para evitar cliques de pulso vizinho no grave
+                let norm_src = (src_off / max_src_reach) * 0.5 + 0.5;
+                let src_w_idx = ((norm_src * (HANN_LUT_SIZE as f32)) as usize).min(HANN_LUT_SIZE - 1);
+                let src_taper = hann_lut[src_w_idx].sqrt();
+                raw_s * src_taper
             } else {
                 0.0
             };
@@ -631,12 +606,8 @@ impl PsolaSubVoice {
             let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
             lut_phase += lut_step;
 
-            let combined_grain = body_val + fmt_val;
-            let dither = (self.rng_dither.next_bipolar() + self.rng_dither.next_bipolar()) * 0.25;
-            let q15 = (combined_grain * 32_768.0 + dither).round() * (1.0 / 32_768.0);
-
             let dst = (out_center as isize + offset_out) as usize & RING_MASK;
-            self.out_ring[dst] = (self.out_ring[dst] + q15 * w).clamp(-3.99, 3.99);
+            self.out_ring[dst] += sample * w;
             self.w_ring[dst] += w;
         }
     }
@@ -667,13 +638,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_psola_ring_no_ghost_echo() {
+    fn test_psola_ring_no_ghost_echo_and_clean_live_mode() {
         let sr = 44_100.0;
         let hann_lut = build_hann_lut();
         let mut voice = PsolaSubVoice::new(1);
         let mut dry_ring = vec![0.0_f32; RING_SIZE];
         let mut write_pos = 2048usize;
-        let f0 = 220.0_f32;
+        let f0 = 110.0_f32;
         let period = (sr / f0) as usize;
         let mut latest_mark = write_pos - 512;
         let max_grain = max_grain_for_sr(sr);
@@ -698,7 +669,6 @@ mod tests {
             let emit_voiced = if step >= 1024 && step < 4000 + 1024 { 1.0 } else { 0.0 };
 
             let y = voice.step_sample(
-                &dry_ring,
                 &dry_ring,
                 &hann_lut,
                 write_pos,
@@ -727,8 +697,8 @@ mod tests {
 
         let ghost_rms = (silence_rms_acc / silence_count as f32).sqrt();
         assert!(
-            ghost_rms < 1e-5,
-            "Eco fantasma detectado no anel PSOLA: RMS = {}",
+            ghost_rms < 1e-6,
+            "Ruido residual ou eco fantasma detectado no anel PSOLA: RMS = {}",
             ghost_rms
         );
     }
