@@ -6,8 +6,8 @@ pub mod scales;
 use dsp::{
     analog_bus_soft_limit, gain_db_to_lin, live_lookahead_for_sr, live_out_delay_for_sr,
     lookahead_samples_for_sr, max_grain_for_sr, out_delay_for_sr, pan50_to_gains, voice_db_to_lin,
-    BiquadLowpass, ChoirAnalogBus, HarmonyChannelDsp, PitchTracker, PsolaSubVoice, ScopedFtzDaz,
-    SibilanceDetector, RING_MASK, RING_SIZE,
+    BiquadLowpass, ChoirAnalogBus, HarmonyChannelDsp, PitchTracker, PsolaSubVoice, RelayBypassModel,
+    ScopedFtzDaz, SibilanceDetector, RING_MASK, RING_SIZE,
 };
 use scales::{ScaleBank, ScaleId};
 
@@ -21,7 +21,7 @@ pub struct VstParamSpec {
     pub default: f32,
 }
 
-pub const NUM_VST_PARAMS: usize = 95;
+pub const NUM_VST_PARAMS: usize = 96;
 
 const fn sp(index: usize, id: &'static str, unit: &'static str, min: f32, max: f32, default: f32) -> VstParamSpec {
     VstParamSpec { index, id, unit, min, max, default }
@@ -76,6 +76,7 @@ pub const VST_PARAM_SPECS: [VstParamSpec; NUM_VST_PARAMS] = [
     sp(89, "user4/6", "", -128.0, 127.0, 0.0), sp(90, "user4/7", "", -128.0, 127.0, 0.0),
     sp(91, "user4/8", "", -128.0, 127.0, 0.0), sp(92, "user4/9", "", -128.0, 127.0, 0.0),
     sp(93, "user4/10", "", -128.0, 127.0, 0.0), sp(94, "user4/11", "", -128.0, 127.0, 0.0),
+    sp(95, "natural", "", 0.0, 1.0, 0.0),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +117,7 @@ impl Default for HarmonyVoiceParams {
 #[derive(Clone, Debug)]
 pub struct DecaBuddyParams {
     pub bypass: bool,
+    pub natural_mode: bool,
     pub live_mode: bool,
     pub link: bool,
     pub preset: i8,
@@ -136,6 +138,7 @@ impl Default for DecaBuddyParams {
     fn default() -> Self {
         Self {
             bypass: false,
+            natural_mode: false,
             live_mode: true,
             link: false,
             preset: -1,
@@ -168,6 +171,7 @@ struct VoiceSlewState {
     gl_smooth: f32,
     gr_smooth: f32,
     pitch_ratio_smooth: f32,
+    pitch_ratio_vel: f32,
     was_active: bool,
 }
 
@@ -178,6 +182,7 @@ impl Default for VoiceSlewState {
             gl_smooth: 0.707,
             gr_smooth: 0.707,
             pitch_ratio_smooth: 1.0,
+            pitch_ratio_vel: 0.0,
             was_active: false,
         }
     }
@@ -190,8 +195,8 @@ pub struct DecaBuddyProcessor {
     pub preset_slots: [DecaBuddyParams; 4],
     pub scale_bank: ScaleBank,
     pub leds: InputMeterLeds,
-
     hann_lut: Vec<f32>,
+
     dry_ring: Vec<f32>,
     lp_ring: Vec<f32>,
     mask_ring: Vec<f32>,
@@ -200,6 +205,7 @@ pub struct DecaBuddyProcessor {
     hop_counter: usize,
 
     choir_bus: ChoirAnalogBus,
+    relay_bypass: RelayBypassModel,
     sibilance_det: SibilanceDetector,
     lp_filter: BiquadLowpass,
     pitch: PitchTracker,
@@ -278,6 +284,7 @@ impl DecaBuddyProcessor {
             write_pos: init_write,
             hop_counter: 0,
             choir_bus,
+            relay_bypass: RelayBypassModel::new(),
             sibilance_det: SibilanceDetector::default(),
             lp_filter: lp,
             pitch,
@@ -336,6 +343,7 @@ impl DecaBuddyProcessor {
         self.sib_ring.fill(0.0);
         self.choir_bus.reset();
         self.sibilance_det.reset();
+        self.relay_bypass.reset();
         self.pitch.reset();
         self.nju7032_env = 0.0;
         self.write_pos = self.lookahead * 2 + self.out_delay;
@@ -422,6 +430,7 @@ impl DecaBuddyProcessor {
                 let step = (index - 47) % 12;
                 self.scale_bank.set_user_step_raw(u_idx, step, val.round() as i8);
             }
+            95 => self.params.natural_mode = val >= 0.5,
             _ => return false,
         }
         true
@@ -465,6 +474,7 @@ impl DecaBuddyProcessor {
                 let step = (index - 47) % 12;
                 self.scale_bank.get_user_step_raw(u_idx, step) as f32
             }
+            95 => if self.params.natural_mode { 1.0 } else { 0.0 },
             _ => return None,
         };
         Some(val)
@@ -650,6 +660,7 @@ impl DecaBuddyProcessor {
         let _ftz_daz_guard = ScopedFtzDaz::new();
 
         self.refresh_midi_targets();
+        self.relay_bypass.update_bypass_trigger(self.params.bypass, self.sample_rate);
 
         let in_gain = gain_db_to_lin(self.params.input_gain_db);
         let drive_norm = (self.params.analog_drive * 0.01).clamp(0.0, 1.0);
@@ -864,11 +875,17 @@ impl DecaBuddyProcessor {
                 let target_pitch_ratio = self.cached_pitch_ratio[v_idx];
                 if !s.was_active || s.pitch_ratio_smooth <= 0.01 {
                     s.pitch_ratio_smooth = target_pitch_ratio;
+                    s.pitch_ratio_vel = 0.0;
+                } else if self.params.natural_mode {
+                    // Modo Natural: Filtro criticamente amortecido de 2a ordem (curva S organica de ~28 ms)
+                    let diff = target_pitch_ratio - s.pitch_ratio_smooth;
+                    let omega = 0.0035_f32;
+                    let accel = omega * omega * diff - 2.0 * omega * s.pitch_ratio_vel;
+                    s.pitch_ratio_vel += accel;
+                    s.pitch_ratio_smooth += s.pitch_ratio_vel;
                 } else {
                     let diff = (target_pitch_ratio - s.pitch_ratio_smooth).abs();
-                    // Tracking continuo de pitch sem degraus/zipper noise entre frames YIN:
-                    // Se houver salto de nota MIDI (diff > 0.06 ~ 1 semitom), aplica glide musical de ~20 ms (0.0025);
-                    // Para micro-afinacao continua e vibrato, aplica tracking fluido de ~5 ms (0.006).
+                    // Modo Classic HV10: Tracking continuo do microcontrolador Hitachi H8
                     let slew_k = if diff > 0.06 { 0.0025 } else { 0.006 };
                     s.pitch_ratio_smooth = (1.0 - slew_k) * s.pitch_ratio_smooth + slew_k * target_pitch_ratio;
                 }
@@ -906,14 +923,28 @@ impl DecaBuddyProcessor {
                 }
             }
 
+            // Modo Natural: Atenua a granulação de sibilâncias no barramento de harmonia
+            // para manter as consoantes ("s", "t", "ch") limpas e naturais a partir do canal direto
+            let sib_duck = if self.params.natural_mode {
+                (1.0 - 0.70 * emit_sib).clamp(0.25, 1.0)
+            } else {
+                1.0
+            };
+            choir_l *= sib_duck;
+            choir_r *= sib_duck;
+
             let (analog_choir_l, analog_choir_r) = if num_active_voices > 0 {
                 self.choir_bus.process_stereo(choir_l, choir_r, drive_norm, num_active_voices)
             } else {
                 (0.0, 0.0)
             };
 
-            out_l[i] = analog_bus_soft_limit((dir_l + analog_choir_l) * self.master_gain_smooth);
-            out_r[i] = analog_bus_soft_limit((dir_r + analog_choir_r) * self.master_gain_smooth);
+            let wet_l = analog_bus_soft_limit((dir_l + analog_choir_l) * self.master_gain_smooth);
+            let wet_r = analog_bus_soft_limit((dir_r + analog_choir_r) * self.master_gain_smooth);
+
+            // Rele fisico Takamisawa RY-9WK com repique mecanico (contact bounce) ao alternar bypass
+            out_l[i] = self.relay_bypass.process_transient(input_mono[i], wet_l, self.sample_rate);
+            out_r[i] = self.relay_bypass.process_transient(input_mono[i], wet_r, self.sample_rate);
 
             self.write_pos = self.write_pos.wrapping_add(1);
         }
@@ -946,14 +977,50 @@ impl DecaBuddyProcessor {
 
             let pol_sign = if self.epoch_polarity >= 0.0 { 1.0 } else { -1.0 };
             let rad_f = radius as f32;
+
+            // Deteccao de GCI baseada em SEDREAMS / Mean-Based Signal (MBS):
+            // O sinal medio sobre o periodo T0 cancela as ressonancias do trato vocal (formantes F1/F2),
+            // isolando o instante de fechamento glotal atraves do cruzamento de zero com derivada negativa.
+            let mut mbs_sum = 0.0_f32;
+            let t0_f = t0 as f32;
+            for i in 0..t0 {
+                mbs_sum += self.dry_ring[start.wrapping_sub(i) & RING_MASK];
+            }
+            let mut prev_mbs = mbs_sum / t0_f;
+            let mut mbs_zc_pos = None;
+            let mut max_mbs_slope = 0.0_f32;
+
+            for k in 1..span {
+                let p = start.wrapping_add(k);
+                let s_in = self.dry_ring[p & RING_MASK];
+                let s_out = self.dry_ring[p.wrapping_sub(t0) & RING_MASK];
+                mbs_sum += s_in - s_out;
+                let cur_mbs = mbs_sum / t0_f;
+
+                let mbs_slope = (prev_mbs - cur_mbs) * pol_sign;
+                let crossed = (prev_mbs * pol_sign >= 0.0 && cur_mbs * pol_sign < 0.0)
+                    || (prev_mbs.signum() != cur_mbs.signum() && mbs_slope > 0.0);
+                if crossed && mbs_slope > max_mbs_slope {
+                    max_mbs_slope = mbs_slope;
+                    mbs_zc_pos = Some(p);
+                }
+                prev_mbs = cur_mbs;
+            }
+
+            let (search_start, search_span) = if let Some(zc) = mbs_zc_pos {
+                (zc.wrapping_sub(2), 5)
+            } else {
+                (start, span)
+            };
+
             let mut best_pos = pred;
             let mut best_score = -1e9_f32;
 
-            for k in 0..span {
-                let p = start.wrapping_add(k);
+            for k in 0..search_span {
+                let p = search_start.wrapping_add(k);
                 let v = self.lp_ring[p & RING_MASK];
                 // Ponderacao centrada no periodo predito T0 com imunidade a inversao de polaridade:
-                let dist = ((k as isize) - (radius as isize)).abs() as f32;
+                let dist = ((p.wrapping_sub(pred) as isize).abs() as f32).min(rad_f);
                 let dist_weight = 1.0 - 0.25 * (dist / rad_f);
                 let score = (v * pol_sign) * dist_weight;
                 if score > best_score {
@@ -1104,6 +1171,7 @@ pub mod truce_integration {
         #[param(name = "Tune", range = "linear(427, 453)", default = 440.0, unit = "Hz")] pub tune: FloatParam,
         #[param(name = "In Gain", range = "linear(-15, 15)", default = 0.0, unit = "dB")] pub input_gain: FloatParam,
         #[param(name = "Drive", range = "linear(0, 100)", default = 35.0, unit = "%")] pub analog_drive: FloatParam,
+        #[param(name = "Natural", default = false)] pub natural_mode: BoolParam,
         #[param(name = "Link", default = false)] pub link: BoolParam,
 
         #[param(name = "Direct", default = true)] pub direct_on: BoolParam,
@@ -1221,6 +1289,7 @@ pub mod truce_integration {
             p.tune_hz = params.tune.read();
             p.input_gain_db = params.input_gain.read();
             p.analog_drive = params.analog_drive.read();
+            p.natural_mode = params.natural_mode.value();
             p.link = params.link.value();
 
             p.direct.enabled = params.direct_on.value();
@@ -1343,6 +1412,7 @@ pub mod truce_integration {
                     dropdown(P::Key, "Key").cols(2), dropdown(P::MidiMode, "MIDI Mode").cols(2),
                     knob(P::MidiCh, "MIDI Ch"), knob(P::Tune, "Tune Hz").cols(2),
                     knob(P::InputGain, "In Gain").cols(2), knob(P::AnalogDrive, "Drive"),
+                    toggle(P::NaturalMode, "Natural"),
                     meter(&[P::MeterIn], "In"),
                 ]),
                 section("DIRECT & UNISON ----------------------------------------------------------------------------------------------------------------------", vec![
@@ -1378,7 +1448,7 @@ pub mod truce_integration {
                     knob(P::H4Level, "Level"), knob(P::H4Pan, "Pan"),
                 ]),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.11")
+            .with_title("CHORUSVOX DECABUDDY v0.2.12")
             .into_editor(&params)
         }
     }
@@ -1465,6 +1535,107 @@ mod jazz_and_live_tests {
         assert!(
             ratio_mid > ratio_before && ratio_mid < target_ratio,
             "Pitch ratio deve deslizar continuamente (glide legato): before={ratio_before:.3}, mid={ratio_mid:.3}, target={target_ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn test_sedreams_gci_stability_on_raspy_fry_voice() {
+        let sr = 44_100.0;
+        let mut proc = DecaBuddyProcessor::new(sr);
+        proc.params.direct.enabled = true;
+        proc.params.harmonies[0].enabled = true;
+        proc.params.harmonies[0].scale = ScaleId::LowOctave;
+
+        // Simulacao de vocal fry / voz rasgada: F0 em 75 Hz com segundo pico espurio de ressonancia F1 (formante)
+        let n = 8192;
+        let mut input = vec![0.0_f32; n];
+        let mut out_l = vec![0.0_f32; n];
+        let mut out_r = vec![0.0_f32; n];
+        let f0 = 75.0_f32;
+        let f1 = 380.0_f32; // ressonancia que causaria falsos picos no rastreador simples
+
+        for i in 0..n {
+            let t = (i as f32) / sr;
+            let pulse = (2.0 * PI * f0 * t).sin();
+            let formant_ring = (2.0 * PI * f1 * t).sin() * (-15.0 * (t * f0).fract()).exp();
+            input[i] = (pulse * 0.6 + formant_ring * 0.4) * 0.8;
+        }
+
+        proc.process_block(&input, &mut out_l, &mut out_r);
+
+        assert!(
+            proc.pitch.voiced,
+            "O PitchTracker deve detectar vozeamento confiavel mesmo em vocal fry a 75 Hz com ressonancia F1"
+        );
+        assert!(
+            (proc.pitch.current_f0 - f0).abs() < 5.0,
+            "F0 detectado deve estar proximo de 75 Hz (detectado={:.2} Hz)",
+            proc.pitch.current_f0
+        );
+    }
+
+    #[test]
+    fn test_natural_mode_s_curve_portamento_and_sibilance_duck() {
+        let sr = 44_100.0;
+        let mut proc = DecaBuddyProcessor::new(sr);
+        proc.params.natural_mode = true;
+        proc.params.direct.enabled = true;
+        proc.params.harmonies[0].enabled = true;
+        proc.params.harmonies[0].scale = ScaleId::Midi;
+        proc.params.midi_mode = MidiHarmonyMode::Priority;
+
+        let n = 4096;
+        let mut input = vec![0.0_f32; n];
+        let mut out_l = vec![0.0_f32; n];
+        let mut out_r = vec![0.0_f32; n];
+        for (i, item) in input.iter_mut().enumerate() {
+            let t = (i as f32) / sr;
+            *item = (2.0 * PI * 220.0 * t).sin() * 0.7;
+        }
+
+        proc.handle_midi_event(0x90, 60, 100);
+        proc.process_block(&input[..2048], &mut out_l[..2048], &mut out_r[..2048]);
+
+        // Salto de nota para disparar portamento em curva S
+        proc.handle_midi_event(0x90, 67, 100);
+        proc.process_block(&input[2048..2048 + 300], &mut out_l[2048..2048 + 300], &mut out_r[2048..2048 + 300]);
+
+        let vel = proc.harmony_slew[0].pitch_ratio_vel;
+        assert!(
+            vel.abs() > 1e-6,
+            "No modo Natural, a velocidade de pitch_ratio_vel deve ser diferente de zero durante transicao em curva S"
+        );
+    }
+
+    #[test]
+    fn test_relay_bypass_hardware_contact_bounce() {
+        let sr = 44_100.0;
+        let mut proc = DecaBuddyProcessor::new(sr);
+        proc.params.bypass = false;
+
+        let n = 1024;
+        let input = vec![0.5_f32; n];
+        let mut out_l = vec![0.0_f32; n];
+        let mut out_r = vec![0.0_f32; n];
+        proc.process_block(&input[..256], &mut out_l[..256], &mut out_r[..256]);
+
+        // Aciona bypass de hardware
+        proc.params.bypass = true;
+        proc.process_block(&input[256..512], &mut out_l[256..512], &mut out_r[256..512]);
+
+        // Durante o periodo de bounce (~97 amostras), o rele deve transicionar dinamicamente
+        let bounce_segment = &out_l[256..256 + 60];
+        let min_val = bounce_segment.iter().fold(f32::MAX, |a, &b| a.min(b));
+        assert!(
+            min_val < 0.45,
+            "O repique mecânico dos reles RY-9WK deve provocar micro-interrupção na comutacao (min_val={min_val})"
+        );
+
+        // Apos assentar completamente (apos 200 amostras), deve entregar sinal limpo
+        let settled_sample = out_l[256 + 200];
+        assert!(
+            (settled_sample - 0.5).abs() < 1e-3,
+            "Apos o repique mecanico, o bypass fisico deve ser 100% transparente (sample={settled_sample})"
         );
     }
 }

@@ -174,6 +174,96 @@ pub fn analog_bus_soft_limit(x: f32) -> f32 {
     }
 }
 
+/// Emulacao do transiente mecanico dos reles de sinal Takamisawa RY-9WK (RL1/RL2) do Akai HV10.
+/// Modela o repique de contato (contact bounce de 1.5 a 2.5 ms) e o micro-thump indutivo de bobina
+/// ao comutar o bypass fisico de hardware.
+#[derive(Clone, Copy, Debug)]
+pub struct RelayBypassModel {
+    prev_bypass: bool,
+    bounce_timer: usize,
+    bounce_total: usize,
+    ring_phase: f32,
+    ring_decay: f32,
+    is_transitioning: bool,
+    target_bypass: bool,
+}
+
+impl Default for RelayBypassModel {
+    fn default() -> Self {
+        Self {
+            prev_bypass: false,
+            bounce_timer: 0,
+            bounce_total: 0,
+            ring_phase: 0.0,
+            ring_decay: 0.0,
+            is_transitioning: false,
+            target_bypass: false,
+        }
+    }
+}
+
+impl RelayBypassModel {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    #[inline]
+    pub fn update_bypass_trigger(&mut self, bypass: bool, sr: f32) {
+        if bypass != self.prev_bypass {
+            self.prev_bypass = bypass;
+            self.target_bypass = bypass;
+            self.bounce_total = ((0.0022 * sr).round() as usize).clamp(32, 256);
+            self.bounce_timer = self.bounce_total;
+            self.ring_phase = 0.0;
+            self.ring_decay = 1.0;
+            self.is_transitioning = true;
+        }
+    }
+
+    #[inline(always)]
+    pub fn process_transient(&mut self, direct_sample: f32, wet_sample: f32, sr: f32) -> f32 {
+        if !self.is_transitioning {
+            return if self.prev_bypass { direct_sample } else { wet_sample };
+        }
+
+        let progress = 1.0 - (self.bounce_timer as f32 / self.bounce_total as f32);
+        self.bounce_timer = self.bounce_timer.saturating_sub(1);
+        if self.bounce_timer == 0 {
+            self.is_transitioning = false;
+            return if self.target_bypass { direct_sample } else { wet_sample };
+        }
+
+        // Contact bounce: micro-interrupcoes de contato nos primeiros 60% da comutacao
+        let bounce_gain = if progress < 0.25 {
+            0.35
+        } else if progress < 0.45 {
+            0.0
+        } else if progress < 0.70 {
+            0.75
+        } else {
+            1.0
+        };
+
+        // Micro-thump indutivo de bobina de 9V (oscilacao amortecida ~1850 Hz a ~ -48 dBFS)
+        let ring_freq = 1850.0;
+        let w = 2.0 * PI * ring_freq / sr;
+        let ring_sig = self.ring_phase.sin() * self.ring_decay * 0.004;
+        self.ring_phase += w;
+        if self.ring_phase > 2.0 * PI { self.ring_phase -= 2.0 * PI; }
+        self.ring_decay *= 0.96;
+
+        let effective_sig = if self.target_bypass {
+            wet_sample * (1.0 - progress) + direct_sample * progress
+        } else {
+            direct_sample * (1.0 - progress) + wet_sample * progress
+        };
+
+        (effective_sig * bounce_gain) + ring_sig
+    }
+}
+
 /// Barramento Analogico Estereo do Coro (Akai HV10 IC13/IC14 NJM4558L + PCM3003E + Ariwa Warmth).
 /// Controlado pelo knob global `Drive` (0..100%) e aplicado exclusivamente no Choir Bus.
 #[derive(Clone, Copy, Debug)]
@@ -195,6 +285,12 @@ pub struct ChoirAnalogBus {
     dc_y1_l: f32,
     dc_x1_r: f32,
     dc_y1_r: f32,
+    da_fast_l: f32,
+    da_slow_l: f32,
+    da_fast_r: f32,
+    da_slow_r: f32,
+    da_fast_a: f32,
+    da_slow_a: f32,
 }
 
 impl Default for ChoirAnalogBus {
@@ -217,6 +313,12 @@ impl Default for ChoirAnalogBus {
             dc_y1_l: 0.0,
             dc_x1_r: 0.0,
             dc_y1_r: 0.0,
+            da_fast_l: 0.0,
+            da_slow_l: 0.0,
+            da_fast_r: 0.0,
+            da_slow_r: 0.0,
+            da_fast_a: (-1.0_f32 / (44_100.0 * 0.015)).exp(),
+            da_slow_a: (-1.0_f32 / (44_100.0 * 0.080)).exp(),
         }
     }
 }
@@ -227,6 +329,8 @@ impl ChoirAnalogBus {
         self.warm_a = (-2.0 * PI * 185.0 / self.sr).exp();
         self.recon_l.set_cutoff(PCM3003_RECON_LP_HZ, self.sr);
         self.recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sr);
+        self.da_fast_a = (-1.0 / (self.sr * 0.015)).exp();
+        self.da_slow_a = (-1.0 / (self.sr * 0.080)).exp();
     }
 
     pub fn reset(&mut self) {
@@ -245,6 +349,10 @@ impl ChoirAnalogBus {
         self.dc_y1_l = 0.0;
         self.dc_x1_r = 0.0;
         self.dc_y1_r = 0.0;
+        self.da_fast_l = 0.0;
+        self.da_slow_l = 0.0;
+        self.da_fast_r = 0.0;
+        self.da_slow_r = 0.0;
     }
 
     #[inline(always)]
@@ -341,7 +449,17 @@ impl ChoirAnalogBus {
         self.dc_x1_r = out_unblocked_r;
         self.dc_y1_r = hp_r;
 
-        (hp_l, hp_r)
+        // 8. Absorcao Dieletrica (DA - Dielectric Absorption) dos capacitores Nichicon/Elna
+        // Modela o relaxamento lento de dipolos no sub-grave (< 80 Hz) com 0% DC residual
+        self.da_fast_l = (1.0 - self.da_fast_a) * hp_l + self.da_fast_a * self.da_fast_l;
+        self.da_slow_l = (1.0 - self.da_slow_a) * hp_l + self.da_slow_a * self.da_slow_l;
+        self.da_fast_r = (1.0 - self.da_fast_a) * hp_r + self.da_fast_a * self.da_fast_r;
+        self.da_slow_r = (1.0 - self.da_slow_a) * hp_r + self.da_slow_a * self.da_slow_r;
+
+        let out_l = hp_l + (0.018 * drv) * self.da_fast_l + (0.009 * drv) * self.da_slow_l;
+        let out_r = hp_r + (0.018 * drv) * self.da_fast_r + (0.009 * drv) * self.da_slow_r;
+
+        (out_l, out_r)
     }
 }
 
@@ -389,9 +507,71 @@ pub fn build_hann_lut() -> Vec<f32> {
     lut
 }
 
-#[allow(clippy::chunks_exact_to_as_chunks)]
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn sq_diff_simd(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn sq_diff_neon(a: &[f32], b: &[f32]) -> f32 {
+    use core::arch::aarch64::*;
+    let len = a.len().min(b.len());
+    let mut sum_v0 = vdupq_n_f32(0.0);
+    let mut sum_v1 = vdupq_n_f32(0.0);
+    let chunks = len / 8;
+    let ptr_a = a.as_ptr();
+    let ptr_b = b.as_ptr();
+
+    for i in 0..chunks {
+        let offset = i * 8;
+        let va0 = vld1q_f32(ptr_a.add(offset));
+        let vb0 = vld1q_f32(ptr_b.add(offset));
+        let diff0 = vsubq_f32(va0, vb0);
+        sum_v0 = vfmaq_f32(sum_v0, diff0, diff0);
+
+        let va1 = vld1q_f32(ptr_a.add(offset + 4));
+        let vb1 = vld1q_f32(ptr_b.add(offset + 4));
+        let diff1 = vsubq_f32(va1, vb1);
+        sum_v1 = vfmaq_f32(sum_v1, diff1, diff1);
+    }
+
+    let sum_v = vaddq_f32(sum_v0, sum_v1);
+    let mut sum = vaddvq_f32(sum_v);
+    for i in (chunks * 8)..len {
+        let d = *ptr_a.add(i) - *ptr_b.add(i);
+        sum += d * d;
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+unsafe fn sq_diff_x86_avx(a: &[f32], b: &[f32]) -> f32 {
+    use core::arch::x86_64::*;
+    let len = a.len().min(b.len());
+    let mut sum_v = _mm256_setzero_ps();
+    let chunks = len / 8;
+    let ptr_a = a.as_ptr();
+    let ptr_b = b.as_ptr();
+
+    for i in 0..chunks {
+        let va = _mm256_loadu_ps(ptr_a.add(i * 8));
+        let vb = _mm256_loadu_ps(ptr_b.add(i * 8));
+        let diff = _mm256_sub_ps(va, vb);
+        let diff2 = _mm256_mul_ps(diff, diff);
+        sum_v = _mm256_add_ps(sum_v, diff2);
+    }
+
+    let mut temp = [0.0_f32; 8];
+    _mm256_storeu_ps(temp.as_mut_ptr(), sum_v);
+    let mut sum = temp[0] + temp[1] + temp[2] + temp[3] + temp[4] + temp[5] + temp[6] + temp[7];
+    for i in (chunks * 8)..len {
+        let d = *ptr_a.add(i) - *ptr_b.add(i);
+        sum += d * d;
+    }
+    sum
+}
+
+#[allow(dead_code, clippy::chunks_exact_to_as_chunks)]
+#[inline(always)]
+fn sq_diff_fallback(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0.0_f32; 8];
     let ca = a.chunks_exact(8);
     let cb = b.chunks_exact(8);
@@ -412,6 +592,26 @@ fn sq_diff_simd(a: &[f32], b: &[f32]) -> f32 {
         }
     }
     acc.iter().sum::<f32>() + tail
+}
+
+#[inline(always)]
+pub fn sq_diff_simd(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        sq_diff_neon(a, b)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx") {
+            unsafe { sq_diff_x86_avx(a, b) }
+        } else {
+            sq_diff_fallback(a, b)
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        sq_diff_fallback(a, b)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -754,6 +954,8 @@ pub struct PsolaSubVoice {
     dac_lp_z1: f32,
     sag_polarity: f32,
     is_dual_warm: bool,
+    ap_x1: f32,
+    ap_y1: f32,
 }
 
 impl PsolaSubVoice {
@@ -774,6 +976,8 @@ impl PsolaSubVoice {
             dac_lp_z1: 0.0,
             sag_polarity,
             is_dual_warm: false,
+            ap_x1: 0.0,
+            ap_y1: 0.0,
         }
     }
 
@@ -792,6 +996,8 @@ impl PsolaSubVoice {
         self.hp_x1 = 0.0;
         self.hp_y1 = 0.0;
         self.dac_lp_z1 = 0.0;
+        self.ap_x1 = 0.0;
+        self.ap_y1 = 0.0;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -947,8 +1153,18 @@ impl PsolaSubVoice {
         let frac = read_f.fract();
         let delayed = self.delay_line[r0i] * (1.0 - frac) + self.delay_line[r1i] * frac;
 
+        let final_out = if self.is_dual_warm {
+            let a = 0.38_f32;
+            let y_ap = a * delayed + self.ap_x1 - a * self.ap_y1;
+            self.ap_x1 = delayed;
+            self.ap_y1 = y_ap;
+            y_ap
+        } else {
+            delayed
+        };
+
         self.delay_write = self.delay_write.wrapping_add(1);
-        delayed
+        final_out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1016,12 +1232,18 @@ impl PsolaSubVoice {
                 let i1 = (i0 + 1).min(max_idx);
                 let i2 = (i0 + 2).min(max_idx);
                 let sample = hermite_interp(cache_slice[im1], cache_slice[i0], cache_slice[i1], cache_slice[i2], frac);
+                let final_sample = if src_step > 1.05 {
+                    let blend = ((src_step - 1.0) * 0.8).min(0.40);
+                    sample * (1.0 - blend) + 0.5 * blend * (cache_slice[im1] + cache_slice[i1])
+                } else {
+                    sample
+                };
 
                 let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
                 lut_phase += lut_step;
 
                 let dst = (out_center as isize + offset_out) as usize & VOICE_RING_MASK;
-                self.out_w_ring[dst][0] += sample * w;
+                self.out_w_ring[dst][0] += final_sample * w;
                 self.out_w_ring[dst][1] += w;
             }
         } else {
@@ -1035,12 +1257,18 @@ impl PsolaSubVoice {
                 let p1 = (p0 + 1) & RING_MASK;
                 let p2 = (p0 + 2) & RING_MASK;
                 let sample = hermite_interp(dry_ring[pm1], dry_ring[p0], dry_ring[p1], dry_ring[p2], frac);
+                let final_sample = if src_step > 1.05 {
+                    let blend = ((src_step - 1.0) * 0.8).min(0.40);
+                    sample * (1.0 - blend) + 0.5 * blend * (dry_ring[pm1] + dry_ring[p1])
+                } else {
+                    sample
+                };
 
                 let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
                 lut_phase += lut_step;
 
                 let dst = (out_center as isize + offset_out) as usize & VOICE_RING_MASK;
-                self.out_w_ring[dst][0] += sample * w;
+                self.out_w_ring[dst][0] += final_sample * w;
                 self.out_w_ring[dst][1] += w;
             }
         }
