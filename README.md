@@ -31,7 +31,56 @@ Pre-compiled binary releases are packaged exclusively for **macOS** (Apple Silic
      ```bash
      ~/Library/Audio/Plug-Ins/VST3/
      ```
-4. Restart your DAW to rescan plug-ins.
+4. Se necessário (caso o macOS bloqueie via Gatekeeper), remova a quarentena no Terminal:
+   ```bash
+   xattr -cr ~/Library/Audio/Plug-Ins/VST3/ChorusVox\ DecaBuddy.vst3 ~/Library/Audio/Plug-Ins/Components/ChorusVox\ DecaBuddy.component
+   ```
+5. Restart your DAW to rescan plug-ins.
+
+---
+
+## 🛠️ Compilação e Instalação a partir do Código-Fonte (Framework TRUCE)
+
+Se você preferir compilar e instalar diretamente do código-fonte em sua máquina, o ChorusVox DecaBuddy utiliza o ecossistema e CLI do **[TRUCE](https://github.com/purefunctor/truce)**.
+
+### 1. Pré-requisitos
+* **Rust Toolchain:** Instale o Rust estável via `rustup`:
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+* **TRUCE CLI (`cargo-truce`):** Instale a ferramenta de linha de comando:
+  ```bash
+  cargo install truce-cli
+  ```
+
+### 2. Comandos de Compilação e Instalação
+
+* **Compilar e instalar automaticamente os formatos AUv2 e VST3:**
+  ```bash
+  cargo truce install --vst3 --au2
+  ```
+  *Este comando compila os artefatos com otimização `--release`, gera os bundles macOS correspondentes (`.vst3` e `.component`), aplica a assinatura de código local (*ad-hoc codesign*) e já copia diretamente para os diretórios padrão do usuário (`~/Library/Audio/Plug-Ins/VST3` e `~/Library/Audio/Plug-Ins/Components`).*
+
+* **Apenas compilar os bundles sem instalar no sistema:**
+  ```bash
+  cargo truce build --vst3 --au2
+  ```
+  *(Os bundles compilados e assinados serão gerados dentro de `target/bundles/`).*
+
+* **Validar os plugins instalados com o validador oficial da Apple (`auval`):**
+  ```bash
+  cargo truce validate --auval
+  ```
+
+* **Limpar cache de Audio Units caso o DAW não reconheça a atualização:**
+  ```bash
+  cargo truce reset-au --yes
+  ```
+
+* **Desinstalar os plugins do sistema:**
+  ```bash
+  cargo truce uninstall --vst3 --au2
+  ```
 
 ---
 
