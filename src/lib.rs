@@ -1015,9 +1015,15 @@ impl DecaBuddyProcessor {
                 self.last_flexi_shift[v_idx] = Some(shift);
                 return Some((shift as f32) - q_norm * dev);
             }
-            let target_midi = self.midi_target_note[v_idx]?;
-            let raw_diff = (target_midi as i32 - note) as f32;
-            return Some(raw_diff - q_norm * dev);
+            let target_midi = self.midi_target_note[v_idx]? as f32;
+            let in_midi = self.pitch.current_midi;
+            let smooth_midi = self.pitch.smooth_midi;
+            // Modo MIDI (patentes Akai JPH0331279B2 / IVL US 5,567,901):
+            // Transição estritamente contínua sem saltos discretos de (1 - q_norm)
+            // Em Quantise = 100%, crava no target_midi (target_midi - in_midi).
+            // Em Quantise = 0%, reproduz 100% do vibrato orgânico do cantor (target_midi - smooth_midi).
+            let shift = target_midi - q_norm * in_midi - (1.0 - q_norm) * smooth_midi;
+            return Some(shift);
         }
 
         let key = (self.params.key % 12) as i32;
@@ -1668,6 +1674,57 @@ mod jazz_and_live_tests {
             println!("len {}: fallback={}, simd={}, diff={}, rel={}", len, res_fallback, res_simd, diff, rel);
             assert!(rel < 1e-4, "SIMD mismatch at len {len}: simd={res_simd}, fallback={res_fallback}");
         }
+    }
+
+    #[test]
+    fn test_legato_note_transition_has_no_transient_clicks() {
+        let sr = 44_100.0;
+        let mut proc = DecaBuddyProcessor::new(sr);
+        proc.host_offline = true;
+        proc.params.direct.enabled = true;
+        proc.params.harmonies[0].enabled = true;
+        proc.params.harmonies[0].scale = ScaleId::High3rdModal1;
+
+        // C4 (261.63 Hz) transicionando legato para D4 (293.66 Hz)
+        let n1 = (0.4 * sr) as usize;
+        let n2 = (0.4 * sr) as usize;
+        let total = n1 + n2;
+        let mut input = vec![0.0_f32; total];
+
+        for i in 0..n1 {
+            let t = i as f32 / sr;
+            input[i] = ((2.0 * PI * 261.63 * t).sin() * 0.6 + (2.0 * PI * 523.26 * t).sin() * 0.3) * 0.7;
+        }
+        for i in 0..n2 {
+            let t = (n1 + i) as f32 / sr;
+            input[n1 + i] = ((2.0 * PI * 293.66 * t).sin() * 0.6 + (2.0 * PI * 587.32 * t).sin() * 0.3) * 0.7;
+        }
+
+        let mut out_l = vec![0.0_f32; total];
+        let mut out_r = vec![0.0_f32; total];
+
+        for ((in_blk, l_blk), r_blk) in input.chunks(128).zip(out_l.chunks_mut(128)).zip(out_r.chunks_mut(128)) {
+            proc.process_block(in_blk, l_blk, r_blk);
+        }
+
+        let latency = proc.latency_samples() as usize;
+        let trans_out = n1 + latency;
+
+        // Verifica a janela de transição (+/- 1500 amostras)
+        let w_start = trans_out.saturating_sub(1500);
+        let w_end = (trans_out + 1500).min(total - 1);
+        let mut max_diff = 0.0_f32;
+        for i in w_start..w_end {
+            let d = (out_l[i + 1] - out_l[i]).abs();
+            if d > max_diff {
+                max_diff = d;
+            }
+        }
+
+        assert!(
+            max_diff < 0.12,
+            "Transição de nota não deve conter picos de derivada ou cliques (max_diff={max_diff:.4})"
+        );
     }
 }
 

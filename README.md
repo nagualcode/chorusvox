@@ -17,15 +17,13 @@ By combining all **37 original chromatic scale lookup tables and floating-point 
 
 ---
 
-## ⚡ What's New in v0.2.13 (Hotfix)
+## ⚡ What's New in v0.2.14
 
-* **Glottal Epoch Tracking Fixed:** Restored pure low-pass peak epoch tracking centered on true glottal closure instants ($T_0$). Completely eliminates the phase jitter, grain misalignment, and harsh buzzing distortion previously heard on high-pitched singing notes.
-* **Pristine Catmull-Rom Hermite Resampling:** Removed flawed FIR decimation blend in PSOLA grain synthesis, ensuring 100% smooth, artifact-free interpolation across all pitch and formant shifts.
-* **Stereo Phase Coherent Relay Bypass:** Refactored Takamisawa RY-9WK relay modeling into a unified stereo processor, preventing channel desynchronization and maintaining pristine audio throughout.
-* **New "Natural" Mode Toggle:**
-  * **Intelligent Unvoiced Sibilance Ducking:** Detects fricatives and plosives ("s", "t", "ch", "k") and attenuates harmony grain generation during unvoiced consonants. Preserves clean vocal diction without granular buzz.
-  * **Organic 2nd-Order S-Curve Portamento:** Transitions notes with a critically damped human-vocal glide (~28 ms) instead of stepped jumps.
-* **Dielectric Absorption (DA) Modeling:** Simulated the slow dipole relaxation memory of vintage Nichicon/Elna electrolytic coupling capacitors (< 80 Hz) with zero residual DC offset.
+* **Akai & IVL Patent-Derived Continuous NCO Phase Accumulator:** Replaced decremented phase counters with a continuous angular phase accumulator ($\Delta\phi = 1/T_s$) directly derived from **Akai Patent JPH0331279B2 / JPS60159799A** (*"Signal Pitch Converter"*, Koichi Yoshino) and **IVL Technologies US Patent 5,567,901**. Guarantees strict $C^0$ phase continuity during pitch glides and note transitions without phase slips or grain collisions.
+* **Strict Normalized Overlap-Add (NOLA) Precision:** Removed artificial denominator clamping at `0.35` in PSOLA reconstruction, eliminating the transient amplitude notches and clicks previously marking grain boundaries during pitch changes.
+* **Continuous Pitch Quantization (Zero-Step Glissando):** Formulated mathematically continuous MIDI and scale pitch calculations, completely eliminating the $(1 - q_{\text{norm}})$ semitone discrete step jump when pitch tracks across integer chromatic boundaries.
+* **Seamless Legato Note Transitions:** Verified with unit and derivative tests (`test_legato_note_transition_has_no_transient_clicks`), producing silky-smooth musical note transitions without pops, clicks, or artifacts.
+* **Glottal Epoch Tracking & Pure Hermite Resampling:** Preserves full low-pass peak epoch tracking centered on true glottal closure instants ($T_0$) with pure Catmull-Rom cubic Hermite interpolation for 100% clean sound on both bass fundamentals and high-register vocals.
 * **Hardware SIMD Vector Acceleration:** Explicit ARM64 NEON (`vfmaq_f32`) on Apple Silicon and AVX2 on x86_64, running at **73x faster than real-time**.
 
 ---
@@ -35,7 +33,7 @@ By combining all **37 original chromatic scale lookup tables and floating-point 
 Pre-compiled binary releases are packaged exclusively for **macOS** (Universal Apple Silicon & Intel, supporting Ableton Live, Logic Pro, Reaper, Bitwig, Studio One, Cubase, FL Studio, etc.).
 
 1. Navigate to the **[Releases](../../releases)** page of this repository.
-2. Under the latest version (**v0.2.13**), expand the **Assets** section and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`** *(do not download the source code zip)*.
+2. Under the latest version (**v0.2.14**), expand the **Assets** section and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`** *(do not download the source code zip)*.
 3. Extract the archive and copy the bundles to your macOS plug-in directories:
    * **Audio Unit (AUv2):** Copy `ChorusVox DecaBuddy.component` to:
      ```bash

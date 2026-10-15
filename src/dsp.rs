@@ -694,7 +694,7 @@ pub struct PitchTracker {
     cmnd: Vec<f32>,
     oct_bias_lut: Vec<f32>,
     decim_buf: Vec<f32>,
-    smooth_midi: f32,
+    pub smooth_midi: f32,
     pub current_f0: f32,
     pub current_midi: f32,
     pub current_note: i32,
@@ -997,7 +997,7 @@ impl PsolaSubVoice {
     pub fn reset(&mut self) {
         self.out_w_ring.fill([0.0; 2]);
         self.delay_line.fill(0.0);
-        self.synth_phase = 0.0;
+        self.synth_phase = 1.0;
         self.drift_cents = 0.0;
         self.delay_rand_norm = 0.0;
         self.delay_mod_samples = 0.0;
@@ -1089,9 +1089,14 @@ impl PsolaSubVoice {
             let ta = (sr / f0_hz).clamp(20.0, max_ta);
             let ts = (ta / ratio).clamp(12.0, max_ta * 2.0);
 
-            self.synth_phase -= 1.0;
-            if self.synth_phase <= 0.0 {
-                self.synth_phase += ts;
+            // Acumulador de fase NCO continuo (patente Akai JPH0331279B2 / IVL US 5,567,901)
+            // A taxa de avanço angular adapta-se a cada amostra garantindo continuidade C0 de fase
+            self.synth_phase += 1.0 / ts;
+            if self.synth_phase >= 1.0 {
+                self.synth_phase -= 1.0;
+                if self.synth_phase >= 1.0 {
+                    self.synth_phase = 0.0;
+                }
                 // Janela de sintese de 2.0 * ts garante sobreposicao de 50% (soma de pesos Hann = 1.0 constante)
                 let grain_len = ((PSOLA_SYNTH_WINDOW_FACTOR * ts) as usize | 1)
                     .clamp(31, max_safe_grain);
@@ -1111,14 +1116,19 @@ impl PsolaSubVoice {
                 );
             }
         } else {
-            self.synth_phase = 0.0;
+            self.synth_phase = 1.0;
         }
 
         let v_idx = emit_pos & VOICE_RING_MASK;
         let pair = self.out_w_ring[v_idx];
         self.out_w_ring[v_idx] = [0.0, 0.0];
 
-        let wet_nola = pair[0] / pair[1].max(0.35);
+        // Normalizacao OLA estrita sem entalhes de corte (sem corte arbitrario em 0.35)
+        let wet_nola = if pair[1] > 1e-4 {
+            pair[0] / pair[1]
+        } else {
+            0.0
+        };
 
         // Quantizacao simetrica pura de 16 bits do barramento ADSP-2186MKST-300 (IC1) pos-NOLA
         let wet_adsp2186 = if emit_mask > 0.01 {
