@@ -943,8 +943,9 @@ impl DecaBuddyProcessor {
             let wet_r = analog_bus_soft_limit((dir_r + analog_choir_r) * self.master_gain_smooth);
 
             // Rele fisico Takamisawa RY-9WK com repique mecanico (contact bounce) ao alternar bypass
-            out_l[i] = self.relay_bypass.process_transient(input_mono[i], wet_l, self.sample_rate);
-            out_r[i] = self.relay_bypass.process_transient(input_mono[i], wet_r, self.sample_rate);
+            let (final_l, final_r) = self.relay_bypass.process_stereo(input_mono[i], input_mono[i], wet_l, wet_r, self.sample_rate);
+            out_l[i] = final_l;
+            out_r[i] = final_r;
 
             self.write_pos = self.write_pos.wrapping_add(1);
         }
@@ -978,49 +979,14 @@ impl DecaBuddyProcessor {
             let pol_sign = if self.epoch_polarity >= 0.0 { 1.0 } else { -1.0 };
             let rad_f = radius as f32;
 
-            // Deteccao de GCI baseada em SEDREAMS / Mean-Based Signal (MBS):
-            // O sinal medio sobre o periodo T0 cancela as ressonancias do trato vocal (formantes F1/F2),
-            // isolando o instante de fechamento glotal atraves do cruzamento de zero com derivada negativa.
-            let mut mbs_sum = 0.0_f32;
-            let t0_f = t0 as f32;
-            for i in 0..t0 {
-                mbs_sum += self.dry_ring[start.wrapping_sub(i) & RING_MASK];
-            }
-            let mut prev_mbs = mbs_sum / t0_f;
-            let mut mbs_zc_pos = None;
-            let mut max_mbs_slope = 0.0_f32;
-
-            for k in 1..span {
-                let p = start.wrapping_add(k);
-                let s_in = self.dry_ring[p & RING_MASK];
-                let s_out = self.dry_ring[p.wrapping_sub(t0) & RING_MASK];
-                mbs_sum += s_in - s_out;
-                let cur_mbs = mbs_sum / t0_f;
-
-                let mbs_slope = (prev_mbs - cur_mbs) * pol_sign;
-                let crossed = (prev_mbs * pol_sign >= 0.0 && cur_mbs * pol_sign < 0.0)
-                    || (prev_mbs.signum() != cur_mbs.signum() && mbs_slope > 0.0);
-                if crossed && mbs_slope > max_mbs_slope {
-                    max_mbs_slope = mbs_slope;
-                    mbs_zc_pos = Some(p);
-                }
-                prev_mbs = cur_mbs;
-            }
-
-            let (search_start, search_span) = if let Some(zc) = mbs_zc_pos {
-                (zc.wrapping_sub(2), 5)
-            } else {
-                (start, span)
-            };
-
             let mut best_pos = pred;
             let mut best_score = -1e9_f32;
 
-            for k in 0..search_span {
-                let p = search_start.wrapping_add(k);
+            for k in 0..span {
+                let p = start.wrapping_add(k);
                 let v = self.lp_ring[p & RING_MASK];
                 // Ponderacao centrada no periodo predito T0 com imunidade a inversao de polaridade:
-                let dist = ((p.wrapping_sub(pred) as isize).abs() as f32).min(rad_f);
+                let dist = ((k as isize) - (radius as isize)).abs() as f32;
                 let dist_weight = 1.0 - 0.25 * (dist / rad_f);
                 let score = (v * pol_sign) * dist_weight;
                 if score > best_score {
@@ -1448,7 +1414,7 @@ pub mod truce_integration {
                     knob(P::H4Level, "Level"), knob(P::H4Pan, "Pan"),
                 ]),
             ])
-            .with_title("CHORUSVOX DECABUDDY v0.2.12")
+            .with_title("CHORUSVOX DECABUDDY v0.2.13")
             .into_editor(&params)
         }
     }
@@ -1638,4 +1604,72 @@ mod jazz_and_live_tests {
             "Apos o repique mecanico, o bypass fisico deve ser 100% transparente (sample={settled_sample})"
         );
     }
+
+    #[test]
+    fn test_continuous_high_pitch_note_clean() {
+        let sr = 44_100.0;
+        let mut proc = DecaBuddyProcessor::new(sr);
+        proc.params.direct.enabled = true;
+        proc.params.harmonies[0].enabled = true;
+        proc.params.harmonies[0].scale = ScaleId::HighOctave;
+
+        // Nota aguda contínua NA VOZ: F0 = 700 Hz (F5)
+        let f0 = 700.0_f32;
+        let n = 16384;
+        let mut input = vec![0.0_f32; n];
+        let mut out_l = vec![0.0_f32; n];
+        let mut out_r = vec![0.0_f32; n];
+
+        let mut glottal_phase = 0.0_f32;
+        let mut glottal_lp = 0.0_f32;
+        for i in 0..n {
+            glottal_phase += f0 / sr;
+            let pulse = if glottal_phase >= 1.0 {
+                glottal_phase -= 1.0;
+                1.0_f32
+            } else {
+                0.0_f32
+            };
+            glottal_lp = 0.92 * glottal_lp + pulse;
+            input[i] = (glottal_lp - 0.25) * 0.6;
+        }
+
+        proc.process_block(&input, &mut out_l, &mut out_r);
+
+        assert!(proc.pitch.voiced, "Voz aguda contínua deve ser detectada como voiced");
+        assert!(
+            (proc.pitch.current_f0 - f0).abs() < 10.0,
+            "F0 detectado deve ser próximo de 700 Hz (detectado={:.2})",
+            proc.pitch.current_f0
+        );
+
+        // Verifica que o sinal não apresenta descontinuidades espúrias
+        let steady = &out_l[8192..16384];
+        let max_val = steady.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
+        assert!(max_val > 0.05 && max_val < 1.0, "Sinal deve ter amplitude válida sem ceifar (max={max_val})");
+    }
+
+
+
+    #[test]
+    fn test_sq_diff_simd_vs_fallback() {
+        let mut rng = crate::dsp::FastRng::new(12345);
+        for len in [16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024] {
+            let mut a = vec![0.0_f32; len];
+            let mut b = vec![0.0_f32; len];
+            for i in 0..len {
+                a[i] = rng.next_bipolar();
+                b[i] = rng.next_bipolar();
+            }
+            let res_fallback = crate::dsp::sq_diff_fallback(&a, &b);
+            let res_simd = crate::dsp::sq_diff_simd(&a, &b);
+            let diff = (res_simd - res_fallback).abs();
+            let rel = diff / res_fallback.max(1e-6);
+            println!("len {}: fallback={}, simd={}, diff={}, rel={}", len, res_fallback, res_simd, diff, rel);
+            assert!(rel < 1e-4, "SIMD mismatch at len {len}: simd={res_simd}, fallback={res_fallback}");
+        }
+    }
 }
+
+
+

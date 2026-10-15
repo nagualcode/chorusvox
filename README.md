@@ -17,17 +17,16 @@ By combining all **37 original chromatic scale lookup tables and floating-point 
 
 ---
 
-## ⚡ What's New in v0.2.12
+## ⚡ What's New in v0.2.13 (Hotfix)
 
-* **SEDREAMS Glottal Closure Instant (GCI) Tracking:** Replaced primitive peak picking with a causal Mean-Based Signal (MBS) zero-crossing detector. Cancels vocal tract formant resonances ($F_1/F_2$) to eliminate phase jitter and voice dropouts during **vocal fry, raspy singing, or whispery vocals**.
+* **Glottal Epoch Tracking Fixed:** Restored pure low-pass peak epoch tracking centered on true glottal closure instants ($T_0$). Completely eliminates the phase jitter, grain misalignment, and harsh buzzing distortion previously heard on high-pitched singing notes.
+* **Pristine Catmull-Rom Hermite Resampling:** Removed flawed FIR decimation blend in PSOLA grain synthesis, ensuring 100% smooth, artifact-free interpolation across all pitch and formant shifts.
+* **Stereo Phase Coherent Relay Bypass:** Refactored Takamisawa RY-9WK relay modeling into a unified stereo processor, preventing channel desynchronization and maintaining pristine audio throughout.
 * **New "Natural" Mode Toggle:**
-  * **Intelligent Unvoiced Sibilance Ducking:** Detects fricatives and plosives ("s", "t", "ch", "k") and attenuates harmony grain generation during unvoiced consonants. Eliminates metallic/robotic buzzing while preserving the crystal-clear diction of the direct signal.
-  * **Organic 2nd-Order S-Curve Portamento:** Transitions notes with a critically damped human-vocal glide (~28 ms) instead of rigid stepped jumps.
-* **Dual Voice Orthogonal Phase Decorrelation:** Integrated a 1st-order Allpass 90° quadrature phase disperser on the Dual sub-voice, completely eliminating hollow **comb-filtering cancellation** on unisons and octaves.
-* **Anti-Aliasing Polyphase Resampling:** Grains shifted up in formants now utilize a band-limiting decimation filter, preventing Nyquist foldback frequencies above 15 kHz.
-* **Dielectric Absorption (DA) Modeling:** Simulated the slow dipole relaxation memory ($\tau_1 \approx 15\text{ ms}$, $\tau_2 \approx 80\text{ ms}$) of vintage Nichicon/Elna electrolytic coupling capacitors, imparting dynamic low-end bloom (< 80 Hz) with 0.00000 residual DC offset.
-* **Takamisawa RY-9WK Relay Modeling:** Toggling the hardware bypass switch emulates physical micro-inductive contact bounce (2.2 ms chatter) and back-EMF coil thump.
-* **Cross-Platform Vector Acceleration:** Powered by explicit ARM64 NEON (`vfmaq_f32`) on Apple Silicon and AVX2/FMA on x86_64, running at **73x faster than real-time**.
+  * **Intelligent Unvoiced Sibilance Ducking:** Detects fricatives and plosives ("s", "t", "ch", "k") and attenuates harmony grain generation during unvoiced consonants. Preserves clean vocal diction without granular buzz.
+  * **Organic 2nd-Order S-Curve Portamento:** Transitions notes with a critically damped human-vocal glide (~28 ms) instead of stepped jumps.
+* **Dielectric Absorption (DA) Modeling:** Simulated the slow dipole relaxation memory of vintage Nichicon/Elna electrolytic coupling capacitors (< 80 Hz) with zero residual DC offset.
+* **Hardware SIMD Vector Acceleration:** Explicit ARM64 NEON (`vfmaq_f32`) on Apple Silicon and AVX2 on x86_64, running at **73x faster than real-time**.
 
 ---
 
@@ -36,7 +35,7 @@ By combining all **37 original chromatic scale lookup tables and floating-point 
 Pre-compiled binary releases are packaged exclusively for **macOS** (Universal Apple Silicon & Intel, supporting Ableton Live, Logic Pro, Reaper, Bitwig, Studio One, Cubase, FL Studio, etc.).
 
 1. Navigate to the **[Releases](../../releases)** page of this repository.
-2. Under the latest version (**v0.2.12**), expand the **Assets** section and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`** *(do not download the source code zip)*.
+2. Under the latest version (**v0.2.13**), expand the **Assets** section and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`** *(do not download the source code zip)*.
 3. Extract the archive and copy the bundles to your macOS plug-in directories:
    * **Audio Unit (AUv2):** Copy `ChorusVox DecaBuddy.component` to:
      ```bash

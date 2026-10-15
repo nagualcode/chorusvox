@@ -223,16 +223,23 @@ impl RelayBypassModel {
     }
 
     #[inline(always)]
-    pub fn process_transient(&mut self, direct_sample: f32, wet_sample: f32, sr: f32) -> f32 {
+    pub fn process_stereo(
+        &mut self,
+        direct_l: f32,
+        direct_r: f32,
+        wet_l: f32,
+        wet_r: f32,
+        sr: f32,
+    ) -> (f32, f32) {
         if !self.is_transitioning {
-            return if self.prev_bypass { direct_sample } else { wet_sample };
+            return if self.prev_bypass { (direct_l, direct_r) } else { (wet_l, wet_r) };
         }
 
         let progress = 1.0 - (self.bounce_timer as f32 / self.bounce_total as f32);
         self.bounce_timer = self.bounce_timer.saturating_sub(1);
         if self.bounce_timer == 0 {
             self.is_transitioning = false;
-            return if self.target_bypass { direct_sample } else { wet_sample };
+            return if self.target_bypass { (direct_l, direct_r) } else { (wet_l, wet_r) };
         }
 
         // Contact bounce: micro-interrupcoes de contato nos primeiros 60% da comutacao
@@ -254,13 +261,18 @@ impl RelayBypassModel {
         if self.ring_phase > 2.0 * PI { self.ring_phase -= 2.0 * PI; }
         self.ring_decay *= 0.96;
 
-        let effective_sig = if self.target_bypass {
-            wet_sample * (1.0 - progress) + direct_sample * progress
+        let eff_l = if self.target_bypass {
+            wet_l * (1.0 - progress) + direct_l * progress
         } else {
-            direct_sample * (1.0 - progress) + wet_sample * progress
+            direct_l * (1.0 - progress) + wet_l * progress
+        };
+        let eff_r = if self.target_bypass {
+            wet_r * (1.0 - progress) + direct_r * progress
+        } else {
+            direct_r * (1.0 - progress) + wet_r * progress
         };
 
-        (effective_sig * bounce_gain) + ring_sig
+        ((eff_l * bounce_gain) + ring_sig, (eff_r * bounce_gain) + ring_sig)
     }
 }
 
@@ -571,7 +583,7 @@ unsafe fn sq_diff_x86_avx(a: &[f32], b: &[f32]) -> f32 {
 
 #[allow(dead_code, clippy::chunks_exact_to_as_chunks)]
 #[inline(always)]
-fn sq_diff_fallback(a: &[f32], b: &[f32]) -> f32 {
+pub fn sq_diff_fallback(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0.0_f32; 8];
     let ca = a.chunks_exact(8);
     let cb = b.chunks_exact(8);
@@ -954,8 +966,6 @@ pub struct PsolaSubVoice {
     dac_lp_z1: f32,
     sag_polarity: f32,
     is_dual_warm: bool,
-    ap_x1: f32,
-    ap_y1: f32,
 }
 
 impl PsolaSubVoice {
@@ -976,8 +986,6 @@ impl PsolaSubVoice {
             dac_lp_z1: 0.0,
             sag_polarity,
             is_dual_warm: false,
-            ap_x1: 0.0,
-            ap_y1: 0.0,
         }
     }
 
@@ -996,8 +1004,6 @@ impl PsolaSubVoice {
         self.hp_x1 = 0.0;
         self.hp_y1 = 0.0;
         self.dac_lp_z1 = 0.0;
-        self.ap_x1 = 0.0;
-        self.ap_y1 = 0.0;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1153,18 +1159,8 @@ impl PsolaSubVoice {
         let frac = read_f.fract();
         let delayed = self.delay_line[r0i] * (1.0 - frac) + self.delay_line[r1i] * frac;
 
-        let final_out = if self.is_dual_warm {
-            let a = 0.38_f32;
-            let y_ap = a * delayed + self.ap_x1 - a * self.ap_y1;
-            self.ap_x1 = delayed;
-            self.ap_y1 = y_ap;
-            y_ap
-        } else {
-            delayed
-        };
-
         self.delay_write = self.delay_write.wrapping_add(1);
-        final_out
+        delayed
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1232,18 +1228,12 @@ impl PsolaSubVoice {
                 let i1 = (i0 + 1).min(max_idx);
                 let i2 = (i0 + 2).min(max_idx);
                 let sample = hermite_interp(cache_slice[im1], cache_slice[i0], cache_slice[i1], cache_slice[i2], frac);
-                let final_sample = if src_step > 1.05 {
-                    let blend = ((src_step - 1.0) * 0.8).min(0.40);
-                    sample * (1.0 - blend) + 0.5 * blend * (cache_slice[im1] + cache_slice[i1])
-                } else {
-                    sample
-                };
 
                 let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
                 lut_phase += lut_step;
 
                 let dst = (out_center as isize + offset_out) as usize & VOICE_RING_MASK;
-                self.out_w_ring[dst][0] += final_sample * w;
+                self.out_w_ring[dst][0] += sample * w;
                 self.out_w_ring[dst][1] += w;
             }
         } else {
@@ -1257,18 +1247,12 @@ impl PsolaSubVoice {
                 let p1 = (p0 + 1) & RING_MASK;
                 let p2 = (p0 + 2) & RING_MASK;
                 let sample = hermite_interp(dry_ring[pm1], dry_ring[p0], dry_ring[p1], dry_ring[p2], frac);
-                let final_sample = if src_step > 1.05 {
-                    let blend = ((src_step - 1.0) * 0.8).min(0.40);
-                    sample * (1.0 - blend) + 0.5 * blend * (dry_ring[pm1] + dry_ring[p1])
-                } else {
-                    sample
-                };
 
                 let w = hann_lut[(lut_phase >> 16) & (HANN_LUT_SIZE - 1)];
                 lut_phase += lut_step;
 
                 let dst = (out_center as isize + offset_out) as usize & VOICE_RING_MASK;
-                self.out_w_ring[dst][0] += final_sample * w;
+                self.out_w_ring[dst][0] += sample * w;
                 self.out_w_ring[dst][1] += w;
             }
         }
