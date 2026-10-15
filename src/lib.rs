@@ -162,8 +162,26 @@ impl Default for DecaBuddyParams {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InputMeterLeds { pub led_neg12: bool, pub led_neg6: bool, pub led_0_over: bool }
 
-#[derive(Clone, Copy, Default)]
-struct VoiceSlewState { gain_smooth: f32, gl_smooth: f32, gr_smooth: f32, was_active: bool }
+#[derive(Clone, Copy)]
+struct VoiceSlewState {
+    gain_smooth: f32,
+    gl_smooth: f32,
+    gr_smooth: f32,
+    pitch_ratio_smooth: f32,
+    was_active: bool,
+}
+
+impl Default for VoiceSlewState {
+    fn default() -> Self {
+        Self {
+            gain_smooth: 0.0,
+            gl_smooth: 0.707,
+            gr_smooth: 0.707,
+            pitch_ratio_smooth: 1.0,
+            was_active: false,
+        }
+    }
+}
 
 pub struct DecaBuddyProcessor {
     pub sample_rate: f32,
@@ -217,6 +235,8 @@ pub struct DecaBuddyProcessor {
     pub min_t0: usize,
     pub max_t0: usize,
 
+    epoch_polarity: f32,
+    uni_ratio_smooth: f32,
     dir_gain_smooth: f32, dir_gl_smooth: f32, dir_gr_smooth: f32,
     uni_gain_smooth: f32, uni_gl_smooth: f32, uni_gr_smooth: f32,
     uni_was_active: bool,
@@ -277,6 +297,8 @@ impl DecaBuddyProcessor {
             harmony_slew: [VoiceSlewState::default(); 4],
             cached_pitch_ratio: [1.0; 4], cached_formant_ratio: [1.0; 4], cached_uni_ratio: 1.0,
             max_grain, lookahead, out_delay, live_lookahead, live_out_delay, min_t0, max_t0,
+            epoch_polarity: 1.0,
+            uni_ratio_smooth: 1.0,
             dir_gain_smooth: 1.0, dir_gl_smooth: 0.707, dir_gr_smooth: 0.707,
             uni_gain_smooth: 0.0, uni_gl_smooth: 0.707, uni_gr_smooth: 0.707,
             uni_was_active: false, master_gain_smooth: 1.0,
@@ -320,6 +342,8 @@ impl DecaBuddyProcessor {
         self.latest_mark = self.write_pos.wrapping_sub(self.lookahead);
         self.hop_counter = 0;
         self.voiced_env = 0.0;
+        self.epoch_polarity = 1.0;
+        self.uni_ratio_smooth = 1.0;
         self.unison_dsp.reset();
         for h in &mut self.harmony_dsp { h.reset(); }
         self.midi_target_note = [None; 4];
@@ -745,11 +769,19 @@ impl DecaBuddyProcessor {
                     let r = (t0 / 2).max(2);
                     let center = self.write_pos.wrapping_sub(active_lookahead);
                     let mut best_p = center;
-                    let mut best_v = -1e9_f32;
+                    let mut best_score = -1e9_f32;
                     for k in 0..(2 * r + 1) {
                         let p = center.wrapping_sub(r).wrapping_add(k);
                         let v = self.lp_ring[p & RING_MASK];
-                        if v > best_v { best_v = v; best_p = p; }
+                        let score = v.abs();
+                        if score > best_score {
+                            best_score = score;
+                            best_p = p;
+                        }
+                    }
+                    let mark_v = self.lp_ring[best_p & RING_MASK];
+                    if mark_v.abs() > 0.005 {
+                        self.epoch_polarity = mark_v.signum();
                     }
                     self.latest_mark = best_p;
                 }
@@ -787,12 +819,17 @@ impl DecaBuddyProcessor {
 
             let uni_active = target_uni_gain > 0.0 || self.uni_gain_smooth > 1e-4;
             if uni_active {
+                if !self.uni_was_active || self.uni_ratio_smooth <= 0.01 {
+                    self.uni_ratio_smooth = self.cached_uni_ratio;
+                } else {
+                    self.uni_ratio_smooth = 0.996 * self.uni_ratio_smooth + 0.004 * self.cached_uni_ratio;
+                }
                 self.uni_was_active = true;
                 let y_u = self.unison_dsp.step_sample_with_cache(
                     &self.dry_ring, &self.hann_lut, None, emit_sib, current_sag,
                     self.write_pos, read_pos, emit_pos, self.latest_mark,
                     self.voiced_env, emit_mask, self.pitch.current_f0,
-                    self.cached_uni_ratio, uni_formant_ratio, uni_rand_norm,
+                    self.uni_ratio_smooth, uni_formant_ratio, uni_rand_norm,
                     0.0, 11.0 * uni_rand_norm, 0.35, self.sample_rate, self.max_grain,
                 );
                 choir_l += y_u * (self.uni_gain_smooth * self.uni_gl_smooth);
@@ -800,6 +837,7 @@ impl DecaBuddyProcessor {
             } else if self.uni_was_active {
                 self.unison_dsp.reset();
                 self.uni_was_active = false;
+                self.uni_ratio_smooth = 1.0;
             }
 
             for (v_idx, &pv) in pre_voices.iter().enumerate() {
@@ -818,12 +856,25 @@ impl DecaBuddyProcessor {
                     if s.was_active {
                         self.harmony_dsp[v_idx].reset();
                         s.was_active = false;
+                        s.pitch_ratio_smooth = 1.0;
                     }
                     continue;
                 }
+
+                let target_pitch_ratio = self.cached_pitch_ratio[v_idx];
+                if !s.was_active || s.pitch_ratio_smooth <= 0.01 {
+                    s.pitch_ratio_smooth = target_pitch_ratio;
+                } else {
+                    let diff = (target_pitch_ratio - s.pitch_ratio_smooth).abs();
+                    // Tracking continuo de pitch sem degraus/zipper noise entre frames YIN:
+                    // Se houver salto de nota MIDI (diff > 0.06 ~ 1 semitom), aplica glide musical de ~20 ms (0.0025);
+                    // Para micro-afinacao continua e vibrato, aplica tracking fluido de ~5 ms (0.006).
+                    let slew_k = if diff > 0.06 { 0.0025 } else { 0.006 };
+                    s.pitch_ratio_smooth = (1.0 - slew_k) * s.pitch_ratio_smooth + slew_k * target_pitch_ratio;
+                }
                 s.was_active = true;
 
-                let pitch_ratio = self.cached_pitch_ratio[v_idx];
+                let pitch_ratio = s.pitch_ratio_smooth;
                 let formant_ratio = self.cached_formant_ratio[v_idx];
 
                 let ch_dsp = &mut self.harmony_dsp[v_idx];
@@ -893,12 +944,27 @@ impl DecaBuddyProcessor {
             let start = pred.wrapping_sub(radius);
             let span = 2 * radius + 1;
 
+            let pol_sign = if self.epoch_polarity >= 0.0 { 1.0 } else { -1.0 };
+            let rad_f = radius as f32;
             let mut best_pos = pred;
-            let mut best_val = -1e9_f32;
+            let mut best_score = -1e9_f32;
+
             for k in 0..span {
                 let p = start.wrapping_add(k);
                 let v = self.lp_ring[p & RING_MASK];
-                if v > best_val { best_val = v; best_pos = p; }
+                // Ponderacao centrada no periodo predito T0 com imunidade a inversao de polaridade:
+                let dist = ((k as isize) - (radius as isize)).abs() as f32;
+                let dist_weight = 1.0 - 0.25 * (dist / rad_f);
+                let score = (v * pol_sign) * dist_weight;
+                if score > best_score {
+                    best_score = score;
+                    best_pos = p;
+                }
+            }
+
+            let mark_v = self.lp_ring[best_pos & RING_MASK];
+            if mark_v.abs() > 0.005 {
+                self.epoch_polarity = 0.98 * self.epoch_polarity + 0.02 * mark_v.signum();
             }
             self.latest_mark = best_pos;
         }
@@ -933,8 +999,9 @@ impl DecaBuddyProcessor {
         let len = self.chord_notes_len.min(16);
         if len == 1 { return Some(self.chord_notes_fifo[0] as i32 - input_note); }
 
+        let start_idx = len.saturating_sub(6);
         let mut chord_mask = [false; 12];
-        for i in 0..len { chord_mask[(self.chord_notes_fifo[i] as usize) % 12] = true; }
+        for i in start_idx..len { chord_mask[(self.chord_notes_fifo[i] as usize) % 12] = true; }
 
         let mut unique_count = chord_mask.iter().filter(|&&b| b).count();
         if unique_count < 3 {
@@ -1322,6 +1389,7 @@ pub mod truce_integration {
 #[cfg(test)]
 mod jazz_and_live_tests {
     use super::*;
+    use std::f32::consts::PI;
 
     #[test]
     fn test_auto_live_vs_offline_bounce_latency_and_default_zero_random() {
@@ -1353,5 +1421,50 @@ mod jazz_and_live_tests {
         for &n in &[66u8, 69, 73, 75] { proc.handle_midi_event(0x90, n, 100); }
         proc.handle_midi_event(0xB0, 64, 0);
         assert_eq!(proc.chord_notes_len, 4);
+    }
+
+    #[test]
+    fn test_continuous_pitch_glide_and_negative_epoch_polarity() {
+        let sr = 44_100.0;
+        let mut proc = DecaBuddyProcessor::new(sr);
+        proc.params.direct.enabled = false;
+        proc.params.unison.enabled = false;
+        proc.params.harmonies[0].enabled = true;
+        proc.params.harmonies[0].scale = ScaleId::Midi;
+        proc.params.midi_mode = MidiHarmonyMode::Priority;
+
+        // 1. Sinal com impulsos glotais de polaridade negativa
+        let n = 8192;
+        let mut input = vec![0.0_f32; n];
+        let mut out_l = vec![0.0_f32; n];
+        let mut out_r = vec![0.0_f32; n];
+        for (i, item) in input.iter_mut().enumerate() {
+            let t = (i as f32) / sr;
+            // Sinal com pico agudo negativo para testar deteccao de polaridade
+            let fund = (2.0 * PI * 130.81 * t).sin();
+            let asym = if fund > 0.0 { fund * 0.4 } else { fund * 1.2 };
+            *item = asym * 0.7;
+        }
+
+        proc.handle_midi_event(0x90, 60, 100); // C4
+        proc.process_block(&input[..4096], &mut out_l[..4096], &mut out_r[..4096]);
+        assert!(
+            proc.epoch_polarity < 0.0,
+            "Rastreador de epoca deve adaptar-se para polaridade glotal negativa (epoch_polarity={})",
+            proc.epoch_polarity
+        );
+
+        // 2. Transicao de nota MIDI com glide musical continuo (sem degrau discreto de 256 amostras)
+        let ratio_before = proc.harmony_slew[0].pitch_ratio_smooth;
+        proc.handle_midi_event(0x80, 60, 0);
+        proc.handle_midi_event(0x90, 64, 100); // E4 (salto de +4 semitons)
+        proc.process_block(&input[4096..4096 + 400], &mut out_l[4096..4096 + 400], &mut out_r[4096..4096 + 400]);
+        let ratio_mid = proc.harmony_slew[0].pitch_ratio_smooth;
+        let target_ratio = proc.cached_pitch_ratio[0];
+
+        assert!(
+            ratio_mid > ratio_before && ratio_mid < target_ratio,
+            "Pitch ratio deve deslizar continuamente (glide legato): before={ratio_before:.3}, mid={ratio_mid:.3}, target={target_ratio:.3}"
+        );
     }
 }

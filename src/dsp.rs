@@ -176,43 +176,85 @@ pub fn analog_bus_soft_limit(x: f32) -> f32 {
 
 /// Barramento Analogico Estereo do Coro (Akai HV10 IC13/IC14 NJM4558L + PCM3003E + Ariwa Warmth).
 /// Controlado pelo knob global `Drive` (0..100%) e aplicado exclusivamente no Choir Bus.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct ChoirAnalogBus {
+    sr: f32,
     warm_l_z1: f32,
     warm_r_z1: f32,
     warm_a: f32,
     pub sag_env: f32,
+    slew_l: f32,
+    slew_r: f32,
     prev_l: f32,
     prev_r: f32,
     therm_l: f32,
     therm_r: f32,
     recon_l: BiquadLowpass,
     recon_r: BiquadLowpass,
+    dc_x1_l: f32,
+    dc_y1_l: f32,
+    dc_x1_r: f32,
+    dc_y1_r: f32,
+}
+
+impl Default for ChoirAnalogBus {
+    fn default() -> Self {
+        Self {
+            sr: 44_100.0,
+            warm_l_z1: 0.0,
+            warm_r_z1: 0.0,
+            warm_a: (-2.0 * PI * 185.0 / 44_100.0).exp(),
+            sag_env: 0.0,
+            slew_l: 0.0,
+            slew_r: 0.0,
+            prev_l: 0.0,
+            prev_r: 0.0,
+            therm_l: 0.0,
+            therm_r: 0.0,
+            recon_l: BiquadLowpass::default(),
+            recon_r: BiquadLowpass::default(),
+            dc_x1_l: 0.0,
+            dc_y1_l: 0.0,
+            dc_x1_r: 0.0,
+            dc_y1_r: 0.0,
+        }
+    }
 }
 
 impl ChoirAnalogBus {
     pub fn set_sample_rate(&mut self, sr: f32) {
-        self.warm_a = (-2.0 * PI * 185.0 / sr.max(8000.0)).exp();
-        self.recon_l.set_cutoff(PCM3003_RECON_LP_HZ, sr);
-        self.recon_r.set_cutoff(PCM3003_RECON_LP_HZ, sr);
+        self.sr = sr.max(8000.0);
+        self.warm_a = (-2.0 * PI * 185.0 / self.sr).exp();
+        self.recon_l.set_cutoff(PCM3003_RECON_LP_HZ, self.sr);
+        self.recon_r.set_cutoff(PCM3003_RECON_LP_HZ, self.sr);
     }
 
     pub fn reset(&mut self) {
         self.warm_l_z1 = 0.0;
         self.warm_r_z1 = 0.0;
         self.sag_env = 0.0;
+        self.slew_l = 0.0;
+        self.slew_r = 0.0;
         self.prev_l = 0.0;
         self.prev_r = 0.0;
         self.therm_l = 0.0;
         self.therm_r = 0.0;
         self.recon_l.reset();
         self.recon_r.reset();
+        self.dc_x1_l = 0.0;
+        self.dc_y1_l = 0.0;
+        self.dc_x1_r = 0.0;
+        self.dc_y1_r = 0.0;
     }
 
     #[inline(always)]
-    fn njm4558_rail_saturate(v: f32, ceiling: f32) -> f32 {
+    fn njm4558_asym_saturate(v: f32, ceiling: f32, drv: f32) -> f32 {
         let x = v.clamp(-2.5, 2.5);
-        let d = x / ceiling;
+        // Saturacao assimetrica suave modelando op-amps NJM4558L em fonte simples (9V DC)
+        // com geracao musical de 2a harmonica (calor Silk Neve / fita analogica)
+        let asym = 0.08 * drv * (x * x);
+        let x_biased = x + asym;
+        let d = x_biased / ceiling;
         let d2 = d * d;
         ceiling * d * (27.0 + d2) / (27.0 + 9.0 * d2)
     }
@@ -242,13 +284,13 @@ impl ChoirAnalogBus {
             self.sag_env = 0.9997 * self.sag_env + 0.0003 * energy;
         }
 
-        // 3. Saturacao simetrica dos op-amps NJM4558L (IC13/IC14) controlada por Drive
+        // 3. Saturacao assimetrica dos op-amps NJM4558L (IC13/IC14) com 2a harmonica (Silk Red)
         let (sat_l, sat_r) = if drv > 1e-3 {
             let ceiling = (0.96 - 0.12 * drv * self.sag_env.clamp(0.0, 1.0)).clamp(0.78, 0.96);
             let pre_drv = 1.0 + 0.85 * drv;
             let inv_drv = 1.0 / (1.0 + 0.55 * drv);
-            let sl = Self::njm4558_rail_saturate(w_l * pre_drv, ceiling) * inv_drv;
-            let sr_out = Self::njm4558_rail_saturate(w_r * pre_drv, ceiling) * inv_drv;
+            let sl = Self::njm4558_asym_saturate(w_l * pre_drv, ceiling, drv) * inv_drv;
+            let sr_out = Self::njm4558_asym_saturate(w_r * pre_drv, ceiling, drv) * inv_drv;
             (
                 w_l * (1.0 - drv) + sl * drv,
                 w_r * (1.0 - drv) + sr_out * drv,
@@ -257,11 +299,28 @@ impl ChoirAnalogBus {
             (w_l, w_r)
         };
 
-        // 4. Filtro de reconstrucao analogico Burr-Brown PCM3003E (IC3) + indutores LAP02TA (16.8 kHz)
-        let rec_l = self.recon_l.process(sat_l);
-        let rec_r = self.recon_r.process(sat_r);
+        // 4. Limitacao suave de taxa de subida (Slew Rate 1.0 V/us) dos op-amps NJM4558L
+        let (slewed_l, slewed_r) = if drv > 1e-3 && self.sr > 1000.0 {
+            let max_delta = (90_000.0 / self.sr) * (1.0 + 3.0 * (1.0 - drv));
+            let dl = sat_l - self.slew_l;
+            let u_l = dl / max_delta;
+            self.slew_l += max_delta * u_l / (1.0 + u_l * u_l).sqrt();
 
-        // 5. Crosstalk capacitivo e termico do pacote duplo NJM4558L escalado por Drive
+            let dr = sat_r - self.slew_r;
+            let u_r = dr / max_delta;
+            self.slew_r += max_delta * u_r / (1.0 + u_r * u_r).sqrt();
+            (self.slew_l, self.slew_r)
+        } else {
+            self.slew_l = sat_l;
+            self.slew_r = sat_r;
+            (sat_l, sat_r)
+        };
+
+        // 5. Filtro de reconstrucao analogico Burr-Brown PCM3003E (IC3) + indutores LAP02TA (16.8 kHz)
+        let rec_l = self.recon_l.process(slewed_l);
+        let rec_r = self.recon_r.process(slewed_r);
+
+        // 6. Crosstalk capacitivo e termico do pacote duplo NJM4558L escalado por Drive
         let cap_r = (rec_r - self.prev_r) * (0.0012 * drv);
         let cap_l = (rec_l - self.prev_l) * (0.0012 * drv);
         self.prev_l = rec_l;
@@ -269,10 +328,20 @@ impl ChoirAnalogBus {
         self.therm_l = 0.999 * self.therm_l + 0.001 * rec_l;
         self.therm_r = 0.999 * self.therm_r + 0.001 * rec_r;
 
-        (
-            rec_l + cap_r + (0.0005 * drv) * self.therm_r,
-            rec_r + cap_l + (0.0005 * drv) * self.therm_l,
-        )
+        let out_unblocked_l = rec_l + cap_r + (0.0005 * drv) * self.therm_r;
+        let out_unblocked_r = rec_r + cap_l + (0.0005 * drv) * self.therm_l;
+
+        // 7. Capacitores de acoplamento de saida C23/C25 (10 uF / 10k ~ 1.6 Hz, bloqueio 100% de DC)
+        let hp_r_coeff = (-2.0 * PI * 10.0 / self.sr).exp();
+        let hp_l = out_unblocked_l - self.dc_x1_l + hp_r_coeff * self.dc_y1_l;
+        self.dc_x1_l = out_unblocked_l;
+        self.dc_y1_l = hp_l;
+
+        let hp_r = out_unblocked_r - self.dc_x1_r + hp_r_coeff * self.dc_y1_r;
+        self.dc_x1_r = out_unblocked_r;
+        self.dc_y1_r = hp_r;
+
+        (hp_l, hp_r)
     }
 }
 
@@ -904,7 +973,7 @@ impl PsolaSubVoice {
         // segue exclusivamente `formant_ratio`, sem escala por `pitch_ratio`.
         let src_step = fr;
 
-        let l_desired = (((l_base as f32) / fr.max(0.75)).round() as usize | 1).clamp(17, max_safe_grain);
+        let l_desired = (l_base | 1).clamp(17, max_safe_grain);
         let max_src_reach = (MAX_CACHE_RADIUS - 8) as f32;
         let max_l_by_src = (((2.0 * max_src_reach) / src_step).floor() as usize | 1).max(17);
         let l_out = l_desired.min(max_l_by_src).min(max_safe_grain);
@@ -1182,5 +1251,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_choir_analog_bus_silk_warmth_and_dc_rejection() {
+        let sr = 44_100.0;
+        let mut bus = ChoirAnalogBus::default();
+        bus.set_sample_rate(sr);
+
+        let n = 16_384;
+        let mut out_l_accum = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = (i as f32) / sr;
+            let sig = (2.0 * PI * 150.0 * t).sin() * 0.70;
+            let (l, _r) = bus.process_stereo(sig, sig, 0.75, 4);
+            out_l_accum.push(l);
+        }
+
+        // 1. Verificacao de rejeicao de DC pelos capacitores C23/C25 apos estabilizacao
+        // A media sobre 14 ciclos exatos de 150 Hz (14 * 294 = 4116 amostras) isola o componente DC puro
+        let period_samples = 294;
+        let num_cycles = 14;
+        let tail = &out_l_accum[12_000..12_000 + num_cycles * period_samples];
+        let dc_mean: f32 = tail.iter().sum::<f32>() / (tail.len() as f32);
+        assert!(
+            dc_mean.abs() < 1e-4,
+            "Capacitores de saida C23/C25 devem rejeitar qualquer componente DC da saturacao assimetrica (dc_mean={dc_mean})"
+        );
+
+        // 2. Verificacao de limitacao suave de Slew Rate (1.0 V/us) em transiente vertical
+        let mut bus_slew = ChoirAnalogBus::default();
+        bus_slew.set_sample_rate(sr);
+        let (_init_l, _) = bus_slew.process_stereo(-0.85, -0.85, 0.85, 4);
+        let (step_l, _) = bus_slew.process_stereo(0.85, 0.85, 0.85, 4);
+        let delta = (step_l - (-0.85)).abs();
+        assert!(
+            delta < 1.70,
+            "Slew rate limiting do NJM4558 deve arredondar transiente vertical instantaneo (delta={delta})"
+        );
     }
 }

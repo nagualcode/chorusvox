@@ -50,7 +50,7 @@ Controls root key, incoming MIDI chord parsing, master concert pitch, input tran
 | **MIDI Ch** | `1` to `16` | Sets the base MIDI channel. In `Mono (1-4)` mode, voices 1 to 4 listen consecutively on `MIDI Ch` through `MIDI Ch + 3`. |
 | **Tune Hz** | `427 Hz` to `453 Hz` *(Default: `440 Hz`)* | Calibrates master concert A4 reference frequency for the YIN pitch tracker. |
 | **In Gain** | `-15.0 dB` to `+15.0 dB` *(Default: `0.0 dB`)* | Adjusts input drive into the discrete input buffer stage. Pushing above `0 dB` increases warm 2nd-harmonic saturation. |
-| **Drive** | `0.0%` to `100.0%` *(Default: `35.0%`)* | Controls analog warmth and drive in the **ChoirAnalogBus** (Ariwa 185 Hz console warmth shelf, JRC NJM4558L symmetric rail saturation, 9V DC dynamic power supply sag, and stereo crosstalk). Applied exclusively to synthesized choir voices. |
+| **Drive** | `0.0%` to `100.0%` *(Default: `35.0%`)* | Controls analog warmth and drive in the **ChoirAnalogBus** (Ariwa 185 Hz console warmth shelf, JRC NJM4558L asymmetric rail saturation with musical 2nd-harmonic Silk Red warmth, NJM4558L 1.0 V/µs soft slew-rate limiting, 9V DC dynamic power supply sag, C23/C25 output coupling capacitors with 0% DC offset, and stereo crosstalk). Applied exclusively to synthesized choir voices. |
 | **In** *(Meter)* | Vertical Bar | Ballistic input peak meter modeled after the `NJU7032D` (IC401) detector circuit and the 3 front-panel LEDs (`-12 dB`, `-6 dB`, `0 dB/Over`). |
 
 > [!NOTE]
@@ -66,8 +66,9 @@ To control a voice via MIDI notes, set that voice's **Scale** knob to **`MIDI`**
 * **`Priority`:** Notes are assigned to voices in the exact chronological order keys are pressed.
 * **`FlexiChd` (Intelligent Jazz Harmony Engine):** Hold any jazz chord (`Dmaj7`, `F#m6`, `9th`, `13th`, or 2-note guide-tone voicings) and **all 4 voices move dynamically with your sung melody** while locking onto chord tones:
   * **Dynamic Chord-Scale Inference:** Combines held MIDI chord notes with the global **Key** to support 2-note shell voicings and melodic passing tones.
-  * **Voice Leading Memory:** Retains common tones stationary across chord changes (e.g., `F#`, `A`, `C#` between `Dmaj7` and `F#m6`).
+  * **Voice Leading Memory & 20ms Musical Legato:** Retains common tones stationary across chord changes, gliding smoothly into new voicings with natural vocal portamento (eliminating stair-step zipper noise).
   * **Anti-Clash ($b2/b9$ Prevention):** Prevents any harmony voice from landing 1 semitone away from the lead vocal.
+  * **Intelligent Sustain Pedal Focus:** Automatically prioritizes recent chord tones during extended CC64 pedal passages, preventing dissonant 8-note chord clusters.
 
 ---
 
@@ -126,7 +127,7 @@ Four independent PSOLA harmony channels. Engaging **Dual** on all 4 voices along
                       │                       │ 1. TIME-SLICED YIN & SIBILANCE ENGINE         │
                       │                       │ • 1536-Sample Synchronous Window (down to 42Hz│
                       │                       │ • Adaptive ~22.05 kHz Decimation (2x/4x/8x SR)│
-                      │                       │ • Peak Glottal Epoch Tracker on Filtered LP   │
+                      │                       │ • Polarity-Immune Epoch Tracker with T0 Prior │
                       │                       │ • Zero-Crossing Rate & High-Freq Sibilance Det│
                       │                       └───────────────────────┬───────────────────────┘
                       │                                               │
@@ -135,8 +136,9 @@ Four independent PSOLA harmony channels. Engaging **Dual** on all 4 voices along
                       │                       │ 2. 10x TD-PSOLA ENGINE (ADSP-2186M HERITAGE)  │
                       │                       │ • 4-Point Hermite Cubic Interpolation (C1)    │
                       │                       │ • Strict Formant Preservation (src_step = fr) │
-                      │                       │ • 8192-Sample L1 Interleaved Ring Buffer      │
-                      │                       │ • Exact 50% Hann Overlap-Add (NOLA sum = 1.0) │
+                      │                       │ • Exact 50% Hann NOLA Overlap (Weight Sum=1.0)│
+                      │                       │ • Continuous Sample-by-Sample Pitch Slewing   │
+                      │                       │ • 20ms Musical Legato Glissando on MIDI Chords│
                       │                       │ • Post-NOLA 16-bit Q15 Quantizer + 40-bit MAC │
                       │                       │ • Akai 32.78 Hz Subsonic HPF & Voice DAC LPF  │
                       │                       └───────────────────────┬───────────────────────┘
@@ -147,9 +149,12 @@ Four independent PSOLA harmony channels. Engaging **Dual** on all 4 voices along
                       │                       │ • Ariwa Console 185 Hz Low-Mid Warmth Shelf   │
                       │                       │ • 9V DC / 250mA Dynamic Power Supply Sag      │
                       │                       │   (Modeled on C22 220µF Electrolytic Cap)     │
-                      │                       │ • JRC NJM4558L Symmetric Rail Saturation      │
+                      │                       │ • JRC NJM4558L Asymmetric Saturation (Silk 2nd│
+                      │                       │   Harmonic / Tape Warmth)                     │
+                      │                       │ • NJM4558L 1.0 V/µs Soft Slew-Rate Limiting   │
                       │                       │ • Sallen-Key Active LP Filter (16.8 kHz)      │
                       │                       │ • SIP-8 Dual-Opamp Stereo Crosstalk (-62 dB)  │
+                      │                       │ • C23/C25 Output Coupling Caps (0% DC Offset) │
                       │                       └───────────────────────┬───────────────────────┘
                       │                                               │
                       └───────────────────────┬───────────────────────┘
