@@ -161,11 +161,11 @@ Four independent PSOLA harmony channels. Enabling **Dual** across all 4 voices a
 | Control | Range / Options | Description |
 | :--- | :--- | :--- |
 | **On** | `On` / `Off` | Enables or disables voice channel with a 40 ms anti-click envelope (zero CPU when idle). |
-| **Dual** | `On` / `Off` | Activates twin sub-voice panned to opposite stereo side (`-Pan`) with shifted formants, $-9\text{ cents}$ detune, $+14\text{ ms}$ Haas delay, and a **1st-order Allpass 90° phase disperser** that eliminates comb filtering in unisons and octaves. |
+| **Dual** | `On` / `Off` | Activates twin sub-voice panned to opposite stereo side (`-Pan`) with shifted formants, $-9\text{ cents}$ detune, $+14\text{ ms}$ Haas delay, and authentic warm 11.5 kHz analog reconstruction filtering. |
 | **Scale** | `37 Options` | Selects `MIDI`, custom `User` scale, or 35 Akai preset harmony tables (`Low Octave`, `Low 3rd`, `Low 5th`, `Low 7th`, `Unison`, `High 3rd`, `High 5th`, `High 7th`, `High Octave`). |
 | **Random** | `0.0` to `100.0` *(Default: `0.0`)* | Humanizes pitch drift ($\pm 9\text{ cents}$) and timing micro-jitter per sub-voice. Opens at `0.0` for deterministic phase; drift and dynamic 9V sag micro-cents act above `0.0`. |
-| **Formant** | `-50.0` to `+50.0` | Shifts vocal tract formants with strict preservation (`src_step = formant_ratio`) and band-limited anti-aliasing interpolation when shifted upwards. |
-| **Quantise** | `0.0` to `100.0` | Blends between natural vocal inflection tracking (`0%`) and chromatic grid locking (`100%`). |
+| **Formant** | `-50.0` to `+50.0` | Shifts vocal tract formants with strict timbre preservation (`src_step = formant_ratio`) and pure Catmull-Rom cubic Hermite interpolation. |
+| **Quantise** | `0.0` to `100.0` | Blends between natural vocal inflection tracking (`0%`) and chromatic grid locking (`100%`) with continuous pitch quantization and zero step discontinuities. |
 | **Level** | `-24.0 dB` to `0.0 dB` | Channel output level. |
 | **Pan** | `-50` (L) to `+50` (R) | Stereo pan position for the main voice (and mirror `-Pan` for the Dual voice). |
 
@@ -175,37 +175,36 @@ Four independent PSOLA harmony channels. Enabling **Dual** across all 4 voices a
 
 ```text
                ┌─────────────────────────────────────────────────────────────┐
-               │           INPUT SIGNAL (Mono L or Summed L + R)             │
-               └──────────────────────────────┬──────────────────────────────┘
-                                              │
-                      ┌───────────────────────┴───────────────────────┐
-                      │                                               │
-           [ DIRECT LINEAR PATH ]                          [ DIGITAL DSP PATH ]
-           • Takamisawa RY-9WK Relays                      (Burr-Brown PCM3003E ADC)
-             (2.2ms Contact Chatter Bounce)                           │
-           • 100% Linear & Transparent (0% THD)                       │
-           • 20 Hz - 20 kHz Flat Response                             ▼
-           • Live: 0 ms delay / Studio: 2496 PDC      ┌───────────────────────────────────────────────┐
-                      │                               │ 1. TIME-SLICED YIN & SEDREAMS GCI ENGINE      │
-                      │                               │ • 1536-Sample Synchronous Window (down to 42Hz│
-                      │                               │ • Adaptive ~22.05 kHz Decimation (2x/4x/8x SR)│
-                      │                               │ • SEDREAMS Mean-Based Signal (MBS) Detector   │
-                      │                               │   (Cancels F1/F2 formants for fry stability)  │
-                      │                               │ • Zero-Crossing Rate & High-Freq Sibilance Det│
-                      │                               └───────────────────────┬───────────────────────┘
-                      │                                                       │
-                      │                                                       ▼
-                      │                               ┌───────────────────────────────────────────────┐
-                      │                               │ 2. 10x TD-PSOLA ENGINE (ADSP-2186M HERITAGE)  │
-                      │                               │ • 4-Point Hermite Cubic Interpolation (C1)    │
-                      │                               │ • Anti-Aliasing Polyphase Resampling on Form. │
-                      │                               │ • Dual Voice Allpass 90° Phase Decorrelation  │
-                      │                               │   (Zero destructive comb-filtering on unisons)│
-                      │                               │ • Exact 50% Hann NOLA Overlap (Weight Sum=1.0)│
-                      │                               │ • Mode: Classic HV10 vs. Natural S-Curve Slew │
-                      │                               │ • Post-NOLA 16-bit Q15 Quantizer + 40-bit MAC │
-                      │                               │ • Akai 32.78 Hz Subsonic HPF & Voice DAC LPF  │
-                      │                               └───────────────────────┬───────────────────────┘
+                │           INPUT SIGNAL (Mono L or Summed L + R)             │
+                └──────────────────────────────┬──────────────────────────────┘
+                                               │
+                       ┌───────────────────────┴───────────────────────┐
+                       │                                               │
+            [ DIRECT LINEAR PATH ]                          [ DIGITAL DSP PATH ]
+            • Takamisawa RY-9WK Relays                      (Burr-Brown PCM3003E ADC)
+              (2.2ms Contact Chatter Bounce)                           │
+            • 100% Linear & Transparent (0% THD)                       │
+            • 20 Hz - 20 kHz Flat Response                             ▼
+            • Live: 0 ms delay / Studio: 2496 PDC      ┌───────────────────────────────────────────────┐
+                       │                               │ 1. TIME-SLICED YIN & EPOCH TRACKING ENGINE    │
+                       │                               │ • 1536-Sample Synchronous Window (down to 42Hz│
+                       │                               │ • Adaptive ~22.05 kHz Decimation (2x/4x/8x SR)│
+                       │                               │ • Robust Peak Epoch Extraction with T0 Prior  │
+                       │                               │ • Dual-Polarity Glottal Pulse Tracking        │
+                       │                               │ • Zero-Crossing Rate & High-Freq Sibilance Det│
+                       │                               └───────────────────────┬───────────────────────┘
+                       │                                                       │
+                       │                                                       ▼
+                       │                               ┌───────────────────────────────────────────────┐
+                       │                               │ 2. 10x TD-PSOLA ENGINE (ADSP-2186M HERITAGE)  │
+                       │                               │ • Akai & IVL Continuous NCO Phase Accumulator │
+                       │                               │ • Pure 4-Point Hermite Cubic Interpolation (C1│
+                       │                               │ • Continuous MIDI & Scale Pitch Quantization  │
+                       │                               │ • Strict Normalized Overlap-Add (NOLA) Sum    │
+                       │                               │ • Mode: Classic HV10 vs. Natural S-Curve Slew │
+                       │                               │ • Post-NOLA 16-bit Q15 Quantizer + 40-bit MAC │
+                       │                               │ • Akai 32.78 Hz Subsonic HPF & Voice DAC LPF  │
+                       │                               └───────────────────────┬───────────────────────┘
                       │                                                       │
                       │                                                       ▼
                       │                               ┌───────────────────────────────────────────────┐
