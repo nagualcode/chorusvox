@@ -12,7 +12,17 @@
 
 ---
 
-## ⚡ What's New in v0.3.0: HV10 emulation
+## ⚡ What's New in v0.3.1
+
+* **Fixed upper harmonies jumping one or two octaves too high:**
+  * the pitch detector sometimes locked onto the 2nd or 3rd harmonic of vowels like "o" and "u" (≈19% of the time on a test phrase). The period-locked engine then put the whole harmony an octave or more up;
+  * a sub-harmonic check now rejects weak harmonic dips in favor of the true period. Detection accuracy on the test phrase went from 81% to 99.7%;
+  * a new regression test covers three vowels across C3–C5.
+* **USER STYLES tab:**
+  * **RESET** restores the selected U1–U9 to its defaults;
+  * **COPY FROM** copies any factory style (above or below the voice) into the selected user style for editing, like the HV10's "Copy Style".
+
+## v0.3.0: HV10 emulation
 
 v0.3.0 is a rewrite. Controls and DSP now follow the HV10 documentation and the DSP engine of Akai's own DecaBuddy v1.02 software.
 
@@ -85,7 +95,9 @@ Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ablet
 * **USER STYLES tab:**
   * pick U1–U9;
   * drag each note's bar to set its harmony interval (−24…+24 semitones; the resulting note is shown in the current Key);
-  * double-click a bar to leave that note unassigned (`--`).
+  * double-click a bar to leave that note unassigned (`--`);
+  * **RESET** restores the style's defaults;
+  * **COPY FROM** loads a factory style (3A…5H, above or below) as a starting point.
 
 ---
 

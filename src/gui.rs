@@ -2,6 +2,7 @@
 //! Cada voz do HV10 e uma faixa vertical com a sua cor (as cores das harmonias do plugin
 //! DecaBuddy original: azul, amarelo, verde e laranja); so os controles do modo ativo aparecem.
 
+use crate::scales::{StyleBank, StyleId, StyleLookup};
 use crate::truce_integration::{ChorusVoxParams, ChorusVoxParamsParamId as P};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use std::collections::HashMap;
@@ -439,8 +440,30 @@ impl HvGui {
                         self.user_sel = u;
                     }
                 }
-                hint(ui, "drag a bar to set the interval (semitones); double-click = unassigned (--)");
+                ui.add_space(10.0);
+                if small_button(ui, "RESET", 52.0) {
+                    self.reset_user_style(state);
+                }
+                let mut copy_from: Option<(StyleId, bool)> = None;
+                egui::ComboBox::from_id_salt("hv-copy-style")
+                    .selected_text(egui::RichText::new("COPY FROM").size(10.0).color(DIM))
+                    .width(96.0)
+                    .height(320.0)
+                    .show_ui(ui, |ui| {
+                        for st in StyleId::ALL.iter().copied().filter(|s| s.user_index().is_none()) {
+                            for (lower, dir) in [(false, "above"), (true, "below")] {
+                                let name = format!("{} {}", style_name(st), dir);
+                                if ui.selectable_label(false, name).clicked() {
+                                    copy_from = Some((st, lower));
+                                }
+                            }
+                        }
+                    });
+                if let Some((st, lower)) = copy_from {
+                    self.copy_style_into_user(state, st, lower);
+                }
             });
+            hint(ui, "drag a bar to set the interval (semitones); double-click = unassigned (--)");
             ui.add_space(4.0);
             ui.spacing_mut().item_spacing.y = 2.0;
             let key = state.params().key.index() as usize;
@@ -487,6 +510,52 @@ impl HvGui {
             }
         });
     }
+}
+
+impl HvGui {
+    fn user_step_id(&self, user: usize, step: usize) -> Option<u32> {
+        self.by_name.get(format!("U{} {}", user + 1, NOTE_NAMES[step]).as_str()).copied()
+    }
+
+    /// RESET: volta o User Style selecionado aos valores iniciais.
+    fn reset_user_style(&self, state: &Ctx) {
+        for step in 0..12 {
+            if let Some(id) = self.user_step_id(self.user_sel, step) {
+                if let Some(info) = self.infos.get(&id) {
+                    self.set_plain(state, id, info.default_plain);
+                }
+            }
+        }
+    }
+
+    /// COPY STYLE do HV10: copia um estilo de fabrica (versao acima ou abaixo da voz) para o
+    /// User Style selecionado, para edita-lo a partir dele.
+    fn copy_style_into_user(&self, state: &Ctx, style: StyleId, lower: bool) {
+        let bank = StyleBank::default();
+        for step in 0..12 {
+            let Some(id) = self.user_step_id(self.user_sel, step) else { continue };
+            let v = match bank.lookup(style, lower, 0, 60 + step as i32) {
+                StyleLookup::Interval(v) => v as f64,
+                StyleLookup::Unassigned => -25.0,
+            };
+            self.set_plain(state, id, v);
+        }
+    }
+}
+
+fn style_name(st: StyleId) -> &'static str {
+    const NAMES: [&str; 18] = [
+        "UN", "8v", "3A", "3B", "3C", "3D", "3E", "3F", "3G", "3H", "5A", "5B", "5C", "5D", "5E", "5F", "5G", "5H",
+    ];
+    NAMES.get(st as usize).copied().unwrap_or("U")
+}
+
+fn small_button(ui: &mut egui::Ui, text: &str, width: f32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::click());
+    let fill = if resp.is_pointer_button_down_on() { GLOBAL } else if resp.hovered() { Color32::from_rgb(70, 70, 70) } else { PANEL_HI };
+    ui.painter().rect_filled(rect, CornerRadius::same(2), fill);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(10.0), TEXT);
+    resp.clicked()
 }
 
 impl EditorUi<ChorusVoxParams> for HvGui {

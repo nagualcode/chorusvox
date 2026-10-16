@@ -38,6 +38,12 @@ pub mod hw {
     /// Limiar YIN para iniciar/manter vozeamento.
     pub const YIN_THRESHOLD_ONSET: f32 = 0.15;
     pub const YIN_THRESHOLD_HOLD: f32 = 0.25;
+    /// Um multiplo do periodo substitui o candidato se o seu CMND for menor que esta fracao
+    /// do CMND do candidato (protecao contra erro de oitava acima).
+    pub const SUBHARMONIC_RATIO: f32 = 0.35;
+    /// So candidatos fracos (CMND acima disto) passam pelo teste: um periodo real costuma ficar
+    /// abaixo de 0.05, os mergulhos de harmonico em 0.2-0.3.
+    pub const SUBHARMONIC_WEAK_DIP: f32 = 0.08;
     /// Salto de pitch (semitons) que exige confirmacao numa segunda leitura (DSP: 2.5 st).
     pub const JUMP_CONFIRM_SEMITONES: f32 = 2.5;
     /// Sustentacao do vozeamento apos perder o pitch (DSP: 50 ms).
@@ -522,6 +528,24 @@ impl PitchTracker {
             return;
         }
 
+        // Teste de sub-harmonico: com 2o/3o harmonico forte (vogais "o"/"u" em notas medias) o
+        // primeiro mergulho pode cair em T/2 ou T/3. Se um multiplo do periodo for claramente
+        // mais periodico, ele e o periodo real (evita harmonias uma oitava acima).
+        'refine: loop {
+            for mult in [2usize, 3] {
+                let cand = best * mult;
+                if cand + 3 >= self.tau_max { continue; }
+                let (t, v) = (cand - 2..=cand + 2)
+                    .map(|t| (t, self.cmnd[t]))
+                    .fold((cand, f32::MAX), |acc, x| if x.1 < acc.1 { x } else { acc });
+                if self.cmnd[best] > hw::SUBHARMONIC_WEAK_DIP && v < self.cmnd[best] * hw::SUBHARMONIC_RATIO {
+                    best = t;
+                    continue 'refine;
+                }
+            }
+            break;
+        }
+
         let y0 = self.cmnd[best - 1];
         let y1 = self.cmnd[best];
         let y2 = self.cmnd[best + 1];
@@ -867,6 +891,65 @@ mod tests {
             assert!(pt.voiced, "{f} Hz deveria ser vozeado");
             let cents = 1200.0 * (pt.f0 / f).log2();
             assert!(cents.abs() < 5.0, "{f} Hz: erro {cents} cents");
+        }
+    }
+
+    /// Vogal sintetica: trem de pulsos glotais filtrado por tres ressonadores de formante.
+    pub(crate) fn formant_vowel(f0: f32, formants: [f32; 3], sr: f32, n: usize) -> Vec<f32> {
+        let mut res = [(0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32); 3];
+        for (k, r) in res.iter_mut().enumerate() {
+            let bw = [90.0, 110.0, 160.0][k];
+            let rad = (-PI * bw / sr).exp();
+            *r = (1.0 - rad, -2.0 * rad * (2.0 * PI * formants[k] / sr).cos(), rad * rad, 0.0, 0.0);
+        }
+        let mut phase = 0.0_f32;
+        let mut glottal = 0.0_f32;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let vib = 0.2 * (2.0 * PI * 5.5 * i as f32 / sr).sin();
+            let f = f0 * semitones_to_ratio(vib);
+            let prev = phase.floor();
+            phase += f / sr;
+            let pulse = if phase.floor() > prev { 1.0 } else { 0.0 };
+            glottal = pulse + 0.93 * glottal;
+            let mut x = glottal;
+            for r in &mut res {
+                let y = r.0 * x - r.1 * r.3 - r.2 * r.4;
+                r.4 = r.3;
+                r.3 = y;
+                x = y;
+            }
+            out.push(x);
+        }
+        let peak = out.iter().fold(0.0_f32, |a, &v| a.max(v.abs())).max(1e-6);
+        out.iter().map(|v| v * 0.5 / peak).collect()
+    }
+
+    #[test]
+    fn no_octave_errors_on_vowels_with_strong_harmonics() {
+        // "o" e "u" com F1 perto de 2*f0 enganavam o detector (harmonias uma oitava acima).
+        let sr = 44_100.0;
+        let vowels = [[500.0, 900.0, 2700.0], [350.0, 800.0, 2600.0], [800.0, 1250.0, 2800.0]];
+        for vowel in vowels {
+            for note in [48, 52, 55, 60, 64, 67, 72] {
+                let f0 = 440.0 * semitones_to_ratio(note as f32 - 69.0);
+                let sig = formant_vowel(f0, vowel, sr, 30_000);
+                let mut ring = vec![0.0; RING_SIZE];
+                let mut lp = Butter4::lowpass(hw::ANALYSIS_SR * 0.4, sr);
+                let mut pt = PitchTracker::new(sr);
+                let (mut ok, mut total) = (0, 0);
+                for (i, &x) in sig.iter().enumerate() {
+                    ring[i & RING_MASK] = lp.process(x);
+                    if i > 4096 && i % 256 == 0 {
+                        pt.analyze(&ring, i + 1, 440.0);
+                        if pt.voiced {
+                            total += 1;
+                            if (pt.midi - note as f32).abs() < 1.0 { ok += 1; }
+                        }
+                    }
+                }
+                assert!(total > 50 && ok * 100 >= total * 98, "vogal {vowel:?} nota {note}: {ok}/{total} corretos");
+            }
         }
     }
 
