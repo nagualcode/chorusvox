@@ -5,6 +5,7 @@ pub mod dsp;
 #[cfg(feature = "truce-plugin")]
 pub mod gui;
 pub mod harmony;
+pub mod pitch;
 pub mod programs;
 pub mod scales;
 
@@ -669,6 +670,43 @@ pub mod truce_integration {
         }
     }
 
+    impl ChorusVoxDsp {
+        /// Processa `start..end` do bloco do host em pedacos do tamanho dos buffers de trabalho
+        /// (alocados em `reset`): nada e alocado na thread de audio, mesmo que o host mande um
+        /// bloco maior que o anunciado. `peaks` = picos de entrada, saida L e R.
+        fn render(&mut self, buffer: &mut AudioBuffer, start: usize, end: usize, peaks: &mut [f32; 3]) {
+            let peak = |s: &[f32]| s.iter().fold(0.0_f32, |a, &x| a.max(x.abs()));
+            let mut pos = start;
+            while pos < end {
+                let m = (end - pos).min(self.mono_scratch.len());
+                let range = pos..pos + m;
+                let mono = &mut self.mono_scratch[..m];
+                if buffer.num_input_channels() >= 2 {
+                    let (in_l, in_r) = (&buffer.input(0)[range.clone()], &buffer.input(1)[range.clone()]);
+                    for ((o, &l), &r) in mono.iter_mut().zip(in_l).zip(in_r) { *o = 0.5 * (l + r); }
+                } else if buffer.num_input_channels() == 1 {
+                    mono.copy_from_slice(&buffer.input(0)[range.clone()]);
+                } else {
+                    mono.fill(0.0);
+                }
+                let (out_l, out_r) = (&mut self.out_l_scratch[..m], &mut self.out_r_scratch[..m]);
+                self.core.process_block(mono, out_l, out_r);
+                peaks[0] = peaks[0].max(peak(mono));
+                peaks[1] = peaks[1].max(peak(out_l));
+                peaks[2] = peaks[2].max(peak(out_r));
+                if buffer.num_output_channels() >= 2 {
+                    buffer.output(0)[range.clone()].copy_from_slice(out_l);
+                    buffer.output(1)[range].copy_from_slice(out_r);
+                } else if buffer.num_output_channels() == 1 {
+                    for (o, (&l, &r)) in buffer.output(0)[range].iter_mut().zip(out_l.iter().zip(out_r.iter())) {
+                        *o = 0.5 * (l + r);
+                    }
+                }
+                pos += m;
+            }
+        }
+    }
+
     pub struct ChorusVox;
 
     impl PluginLogic for ChorusVox {
@@ -705,31 +743,12 @@ pub mod truce_integration {
             apply_user_styles(&mut state.core.styles, &params.user_steps());
 
             let n = buffer.num_samples();
-            if state.mono_scratch.len() < n {
-                state.mono_scratch.resize(n, 0.0);
-                state.out_l_scratch.resize(n, 0.0);
-                state.out_r_scratch.resize(n, 0.0);
-            }
-
-            let in_l = buffer.input(0);
-            if buffer.num_input_channels() >= 2 {
-                let in_r = buffer.input(1);
-                for i in 0..n {
-                    state.mono_scratch[i] = 0.5 * (in_l[i] + in_r[i]);
-                }
-            } else {
-                state.mono_scratch[..n].copy_from_slice(&in_l[..n]);
-            }
-
+            let mut peaks = [0.0_f32; 3];
             let mut cur = 0usize;
             for event in events.iter() {
                 let at = (event.sample_offset as usize).min(n);
                 if at > cur {
-                    state.core.process_block(
-                        &state.mono_scratch[cur..at],
-                        &mut state.out_l_scratch[cur..at],
-                        &mut state.out_r_scratch[cur..at],
-                    );
+                    state.render(buffer, cur, at, &mut peaks);
                     cur = at;
                 }
                 match &event.body {
@@ -749,28 +768,14 @@ pub mod truce_integration {
                 }
             }
             if cur < n {
-                state.core.process_block(
-                    &state.mono_scratch[cur..n],
-                    &mut state.out_l_scratch[cur..n],
-                    &mut state.out_r_scratch[cur..n],
-                );
+                state.render(buffer, cur, n, &mut peaks);
             }
 
-            if buffer.num_output_channels() >= 2 {
-                buffer.output(0)[..n].copy_from_slice(&state.out_l_scratch[..n]);
-                buffer.output(1)[..n].copy_from_slice(&state.out_r_scratch[..n]);
-            } else if buffer.num_output_channels() == 1 {
-                for i in 0..n {
-                    buffer.output(0)[i] = 0.5 * (state.out_l_scratch[i] + state.out_r_scratch[i]);
-                }
-            }
-
-            let peak = |s: &[f32]| s.iter().fold(0.0_f32, |a, &x| a.max(x.abs()));
             ctx.set_meter(P::MeterProgram, state.core.program_token);
-            ctx.set_meter(P::MeterIn, peak(&state.mono_scratch[..n]));
-            ctx.set_meter(P::MeterOutL, peak(&state.out_l_scratch[..n]));
+            ctx.set_meter(P::MeterIn, peaks[0]);
+            ctx.set_meter(P::MeterOutL, peaks[1]);
             if buffer.num_output_channels() >= 2 {
-                ctx.set_meter(P::MeterOutR, peak(&state.out_r_scratch[..n]));
+                ctx.set_meter(P::MeterOutR, peaks[2]);
             }
             ProcessStatus::Normal
         }

@@ -232,6 +232,18 @@ fn main() -> std::io::Result<()> {
         println!("100 presets de fabrica escritos em {dir}/");
         return Ok(());
     }
+    if args.len() >= 4 && args[1] == "track" {
+        // Leituras do rastreador de pitch original: "amostra midi periodo unvoiced".
+        let (input, sr) = read_wav_mono(&args[2])?;
+        let mut t = decabuddy::pitch::PitchTracker::new(sr as f32);
+        let mut out = BufWriter::new(File::create(&args[3])?);
+        for (n, &x) in input.iter().enumerate() {
+            if t.process(x) {
+                writeln!(out, "{n} {:.6} {:.6} {}", t.midi, t.period, u8::from(!t.voiced))?;
+            }
+        }
+        return Ok(());
+    }
     let (input, sr) = if args.len() >= 2 {
         read_wav_mono(&args[1])?
     } else {

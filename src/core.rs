@@ -3,10 +3,11 @@
 
 use crate::dsp::{
     formant_ratio, hw, level_gain, pan_gains, primary_delay, quantize_16, rand_detune_semitones,
-    unison_delay, Biquad, Butter4, FastRng, PitchShifter, PitchTracker, RandDelay, RandomLfo,
+    unison_delay, Biquad, Butter4, FastRng, PitchShifter, RandDelay, RandomLfo,
     ScopedFtzDaz, ShiftParams, RING_MASK, RING_SIZE,
 };
 use crate::harmony::{HarmonyEngine, HarmonySettings, NUM_PARTS};
+use crate::pitch::PitchTracker;
 use crate::programs::{factory_programs, program_change_index, FactoryProgram};
 use crate::scales::{StyleBank, StyleId};
 
@@ -193,10 +194,7 @@ pub struct DecaBuddyProcessor {
     pub leds: InputMeterLeds,
 
     ring: Vec<f32>,
-    analysis_ring: Vec<f32>,
-    analysis_lp: Butter4,
     abs_pos: u64,
-    hop_counter: usize,
     pitch: PitchTracker,
     lfo: RandomLfo,
     dither: FastRng,
@@ -231,10 +229,7 @@ impl DecaBuddyProcessor {
             harmony: HarmonyEngine::default(),
             leds: InputMeterLeds::default(),
             ring: vec![0.0; RING_SIZE],
-            analysis_ring: vec![0.0; RING_SIZE],
-            analysis_lp: Butter4::default(),
             abs_pos: 0,
-            hop_counter: 0,
             pitch: PitchTracker::new(sr),
             lfo: RandomLfo::new(sr),
             dither: FastRng::new(0x5EED_1999),
@@ -265,7 +260,6 @@ impl DecaBuddyProcessor {
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(8000.0);
         let sr = self.sample_rate;
-        self.analysis_lp = Butter4::lowpass(hw::ANALYSIS_SR * 0.4, sr);
         self.pitch.set_sample_rate(sr);
         self.lfo.set_sample_rate(sr);
         // Capacitores de acoplamento de entrada/saida (corte subsonico de poucos Hz).
@@ -284,10 +278,7 @@ impl DecaBuddyProcessor {
 
     pub fn reset(&mut self) {
         self.ring.fill(0.0);
-        self.analysis_ring.fill(0.0);
-        self.analysis_lp.reset();
         self.abs_pos = 0;
-        self.hop_counter = 0;
         self.pitch.reset();
         self.lfo.reset();
         self.in_hp.reset();
@@ -303,19 +294,28 @@ impl DecaBuddyProcessor {
         self.update_voices();
     }
 
-    pub fn detected_pitch(&self) -> (f32, i32, bool) { (self.pitch.f0, self.pitch.note, self.pitch.voiced) }
+    /// (f0 em Hz, MIDI relativo a TUNE, vozeado) da ultima leitura do rastreador.
+    pub fn detected_pitch(&self) -> (f32, f32, bool) {
+        let f0 = if self.pitch.period > 0.0 { self.sample_rate / self.pitch.period } else { 0.0 };
+        (f0, self.tracked_midi(), self.pitch.voiced)
+    }
+
+    /// MIDI do rastreador (69 = A 440) referido a TUNE ADJUST.
+    fn tracked_midi(&self) -> f32 {
+        self.pitch.midi - 12.0 * (self.params.tune_hz.clamp(427.0, 453.0) / 440.0).log2()
+    }
 
     /// Recalcula os parametros das sub-vozes a partir do pitch atual (em degrau, por leitura).
     fn update_voices(&mut self) {
         let sr = self.sample_rate;
         let settings = self.params.effective_harmony();
         self.harmony.midi.base_channel = self.params.midi_base_channel.saturating_sub(1) & 0x0F;
-        let voiced = self.pitch.voiced && self.pitch.f0 > 0.0;
-        let period = if voiced { sr / self.pitch.f0 } else { hw::UNVOICED_PERIOD_44K * sr / hw::NATIVE_SR };
+        let voiced = self.pitch.voiced && self.pitch.period > 0.0;
+        let period = if voiced { self.pitch.period } else { hw::UNVOICED_PERIOD_44K * sr / hw::NATIVE_SR };
 
         let corr = self.params.parts.map(|pp| pp.p_correct / 9.0);
         let shifts = if voiced {
-            self.harmony.shifts(&settings, &self.styles, self.pitch.midi, corr)
+            self.harmony.shifts(&settings, &self.styles, self.tracked_midi(), corr)
         } else {
             [None; NUM_PARTS]
         };
@@ -350,7 +350,6 @@ impl DecaBuddyProcessor {
         let _ftz = ScopedFtzDaz::new();
         let sr = self.sample_rate;
         let in_gain = 10.0_f32.powf(self.params.input_gain_db / 20.0);
-        let tune = self.params.tune_hz.clamp(427.0, 453.0);
         let k = self.smooth;
         self.harmony.midi.base_channel = self.params.midi_base_channel.saturating_sub(1) & 0x0F;
 
@@ -391,30 +390,22 @@ impl DecaBuddyProcessor {
 
         for i in 0..n {
             // --- Entrada analogica -> ADC PCM3003E (16 bits, ceifa em 0 dBFS) ---
-            let x_an = self.in_hp.process(input_mono[i] * in_gain);
+            // NaN/infinito vindo do host contaminaria filtros e anel para sempre.
+            let x_in = if input_mono[i].is_finite() { input_mono[i] } else { 0.0 };
+            let x_an = self.in_hp.process(x_in * in_gain);
             let dither = (self.dither.next_unit() - self.dither.next_unit()) * (1.0 / 32_768.0);
             let x = quantize_16(x_an + dither);
 
             let ax = x.abs();
             self.meter_env = if ax > self.meter_env { ax } else { self.meter_env * 0.9995 };
 
-            let w = self.abs_pos;
-            let idx = w as usize & RING_MASK;
-            self.ring[idx] = x;
-            self.analysis_ring[idx] = self.analysis_lp.process(x);
-
-            // --- Rastreamento de pitch em fatias ---
-            if self.hop_counter == 0 {
-                self.pitch.begin_frame(&self.analysis_ring, (w + 1) as usize);
-                if !self.pitch_frame_active() {
-                    self.update_voices();
-                }
-            }
-            self.hop_counter += 1;
-            if self.hop_counter >= self.pitch.hop { self.hop_counter = 0; }
-            if self.pitch.step(tune) {
+            // --- Rastreador de pitch: cada leitura (ou mudanca de voicing) atualiza as vozes,
+            // antes de a amostra entrar no anel, como no DSP ---
+            if self.pitch.process(x) {
                 self.update_voices();
             }
+            let w = self.abs_pos;
+            self.ring[w as usize & RING_MASK] = x;
             self.lfo.tick();
 
             // --- Vozes de harmonia ---
@@ -489,9 +480,6 @@ impl DecaBuddyProcessor {
         self.leds.led_neg6 = self.meter_env >= 0.501;
         self.leds.led_0_over = self.meter_env >= 0.999;
     }
-
-    #[inline]
-    fn pitch_frame_active(&self) -> bool { self.pitch.is_active() }
 
     /// Carrega um programa de fabrica (0..100 = 01A, 01B, ... 50B). Parametros GLOBAIS do HV10
     /// (TUNE, canal MIDI, nivel de entrada, BYPASS) nao fazem parte do programa.
@@ -579,16 +567,7 @@ mod tests {
         (l, r)
     }
 
-    fn estimate_f0(sig: &[f32], sr: f32) -> f32 {
-        let mut ring = vec![0.0; RING_SIZE];
-        let mut lp = Butter4::lowpass(hw::ANALYSIS_SR * 0.4, sr);
-        for (i, &x) in sig.iter().take(RING_SIZE).enumerate() { ring[i] = lp.process(x); }
-        let mut pt = PitchTracker::new(sr);
-        let end = sig.len().min(RING_SIZE);
-        pt.analyze(&ring, end, 440.0);
-        pt.analyze(&ring, end - 64, 440.0);
-        pt.f0
-    }
+    fn estimate_f0(sig: &[f32], sr: f32) -> f32 { crate::pitch::measure_f0(sig, sr) }
 
     fn solo_part(proc: &mut DecaBuddyProcessor, part: usize, style: StyleId) {
         proc.params.origin.buddies = OriginBuddies::Off;
@@ -655,7 +634,9 @@ mod tests {
         let noise: Vec<f32> = (0..16_384).map(|_| rng.next_bipolar() * 0.3).collect();
         let (l, _) = render(&mut proc, &noise);
         let rms = (l[4000..].iter().map(|v| v * v).sum::<f32>() / (l.len() - 4000) as f32).sqrt();
-        assert!(rms > 0.05, "sibilantes devem passar nas harmonias (rms {rms})");
+        // O rastreador original as vezes "acha" um pitch no ruido; numa nota cromatica sem
+        // atribuicao no 3A a parte cala por aquela leitura (como no DSP).
+        assert!(rms > 0.03, "sibilantes devem passar nas harmonias (rms {rms})");
     }
 
     #[test]

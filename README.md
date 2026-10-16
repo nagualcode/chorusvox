@@ -65,7 +65,20 @@ Tips:
 
 ---
 
-## ⚡ What's New in v0.3.2
+## ⚡ What's New in v0.3.3
+
+* **The original pitch detector.** The YIN detector is replaced by a port of the DecaBuddy's own tracker, reverse engineered from Akai's DSP code:
+  * a 500 Hz low-pass, then one reading per pitch cycle from zero crossings, comparing consecutive periods, lobe areas and slopes;
+  * a 50 ms voicing hold and the 2.5-semitone jump check, as on the hardware;
+  * a regression test checks it reading for reading against the original code, run in an x86 emulator (`tools/dll_pitch_reference.py`, `tests/fixtures/`).
+  * Harmonies now react to your voice the way the HV10 does, including its limits: very high notes on thin vowels (around A5 on "ee") can drop out.
+* **Two shifter heads, like the hardware.** The extra third head is gone. When the pitch jumps, a new grain can cut the previous one, as on the original. On a 7-second vocal this happens on about 0.2% of grains.
+* **Real-time safety:**
+  * nothing is allocated on the audio thread, even if the host sends a larger block than announced;
+  * NaN or infinite input from the host is replaced by silence instead of breaking the voices for good;
+  * CPU use per block no longer has spikes from the pitch analysis. The CLI benchmark went from about 240× to **456× faster than realtime**.
+
+## v0.3.2
 
 * **Style tables from the HV10 manual.** All 16 tables were transcribed note by note from the manual's "Preset styles" score (Appendix p. 31):
   * 13 match Akai's DecaBuddy software;
@@ -254,16 +267,16 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
 | Controls, ranges, modes, MIDI channels and CCs, Normal Bypass, factory program 01A (default) | HV10 operator's manual, `reference/a420d5.pdf` |
 | STYLE tables (16 lower + 16 upper) | "Preset styles" score in the HV10 operator's manual (p. 31); cross-checked with `DecaBuddy.dll` v1.02 |
 | Factory programs and CHORD shapes | "Preset Program List" (pp. 28–29) and "Preset chords" (p. 30) in the operator's manual |
-| Shifter, window shape and length, formant law, random-delay LFOs, unison gain/pan/detune, P.CORRECT formula, unvoiced behavior, pan law, 50 ms voicing hold, 2.5-semitone jump confirmation | Reverse engineering of the DSP engine in `DecaBuddy.dll` v1.02 (Akai's software version, ported from DSP code) |
+| Pitch detector (500 Hz pre-filter, zero-crossing events, period/lobe/slope similarity, 50 ms voicing hold, 2.5-semitone jump check) | `DecaBuddy.dll` v1.02 (0x10008cd0, 0x10008e60, 0x100092d0), verified reading for reading in an x86 emulator |
+| Shifter, window shape and length, formant law, random-delay LFOs, unison gain/pan/detune, P.CORRECT formula, unvoiced behavior, pan law | Reverse engineering of the DSP engine in `DecaBuddy.dll` v1.02 (Akai's software version, ported from DSP code) |
 | Pitch-period rule (window 2× period, shortened only for upward shifts) | IVL Technologies patent US 5,567,901 |
 
 **Known approximations:**
-* **Pitch detection:** uses YIN, a more robust detector. The original uses a zero-crossing/lobe-similarity tracker with a 500 Hz pre-filter. Pitch updates are still stepwise and per analysis, like the DSP.
+* **Pitch detection at other sample rates:** the original only ran at 44.1 kHz. At higher rates its 1000-sample period limit is scaled with the rate, so the lowest note stays at about 44 Hz.
 * **Fixed-delay length:** the D1–D9 length is scaled from the DSP's random-delay centers. The manual only says "the higher, the longer".
 * **LEVEL steps:** the 3 dB LEVEL steps are an estimate. Akai's DecaBuddy software uses a dB control (−24…0 dB), so it does not reveal the hardware's 0–9 curve.
 * **CHORD mode:** the manual mentions 50 preset chords, but its appendix only documents 8; those 8 are implemented. How chord tones are assigned to the four parts is inferred from the manual's examples.
 * **Factory programs:** a few fields from the manual are not modeled: P.CORRECT on the original voice (programs 21–30), Sub voicing outside STYLE mode, and the Sub template/priority. The printed column header says "L1 L2", but the FLEXICHORD and PRIORITY voicings show the real order is L2, L1.
-* **Third shifter head:** one extra head avoids cutting an audible grain when the pitch jumps. The original alternates two.
 
 ---
 
