@@ -65,14 +65,19 @@ Tips:
 
 ---
 
-## ⚡ What's New in v0.3.3
+## ⚡ What's New in v0.3.4
+
+* **No more click at the end of fast downward glides.** When the voice slides down and fades, the pitch detector declares it unvoiced and the harmonies switch to short unison grains. The DSP's two heads then restarted grains that were still sounding, which made a short click or crackle. Those grains now finish in a spare head. Everywhere else the shifter still matches the DSP exactly.
+  * A new test checks this switch for cuts.
+
+## v0.3.3
 
 * **The original pitch detector.** The YIN detector is replaced by a port of the DecaBuddy's own tracker, reverse engineered from Akai's DSP code:
   * a 500 Hz low-pass, then one reading per pitch cycle from zero crossings, comparing consecutive periods, lobe areas and slopes;
   * a 50 ms voicing hold and the 2.5-semitone jump check, as on the hardware;
   * a regression test checks it reading for reading against the original code, run in an x86 emulator (`tools/dll_pitch_reference.py`, `tests/fixtures/`).
   * Harmonies now react to your voice the way the HV10 does, including its limits: very high notes on thin vowels (around A5 on "ee") can drop out.
-* **Two shifter heads, like the hardware.** The extra third head is gone. When the pitch jumps, a new grain can cut the previous one, as on the original. On a 7-second vocal this happens on about 0.2% of grains.
+* **Two shifter heads, like the hardware.** The extra third head is gone. (v0.3.4 adds spare heads back for one case: see above.)
 * **Real-time safety:**
   * nothing is allocated on the audio thread, even if the host sends a larger block than announced;
   * NaN or infinite input from the host is replaced by silence instead of breaking the voices for good;
@@ -273,6 +278,7 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
 
 **Known approximations:**
 * **Pitch detection at other sample rates:** the original only ran at 44.1 kHz. At higher rates its 1000-sample period limit is scaled with the rate, so the lowest note stays at about 44 Hz.
+* **Spare shifter heads:** the DSP alternates two heads and restarts the older one even while it still sounds. That happens when the pitch period suddenly gets shorter, mainly when the voice turns unvoiced at the end of a phrase or glide, and it clicks. Here the grain that is still sounding finishes in one of two spare heads. In all other cases the output is the DSP's.
 * **Fixed-delay length:** the D1–D9 length is scaled from the DSP's random-delay centers. The manual only says "the higher, the longer".
 * **LEVEL steps:** the 3 dB LEVEL steps are an estimate. Akai's DecaBuddy software uses a dB control (−24…0 dB), so it does not reveal the hardware's 0–9 curve.
 * **CHORD mode:** the manual mentions 50 preset chords, but its appendix only documents 8; those 8 are implemented. How chord tones are assigned to the four parts is inferred from the manual's examples.

@@ -256,11 +256,16 @@ impl ShiftParams {
 /// grade de periodo A (A avanca so em multiplos inteiros de P, mantendo A + atraso em
 /// (w - 1.5P, w - 0.5P]) e le a fonte com interpolacao linear a taxa `fr`. Como no DSP, duas
 /// cabecas se alternam (flag de toggle) e sao somadas sem normalizacao; cada grao guarda a
-/// inclinacao do momento em que disparou. Se Ts encurta bruscamente, o novo grao reinicia a
-/// cabeca mais antiga mesmo que ela ainda soe (comportamento do aparelho).
+/// inclinacao do momento em que disparou.
+///
+/// Unico desvio: quando Ts encurta bruscamente (fim de nota, voz -> sem pitch, salto de nota),
+/// o DSP reinicia a cabeca mais antiga mesmo que ela ainda soe, o que gera um click audivel.
+/// Aqui esse grao termina numa cabeca reserva (duas: na passagem para "sem pitch" as duas
+/// cabecas antigas sao substituidas em seguida). Fora desses momentos a saida e a do DSP.
 #[derive(Clone, Debug)]
 pub struct PitchShifter {
-    heads: [ShiftHead; 2],
+    /// Duas cabecas alternadas (0, 1) e duas reservas (2, 3).
+    heads: [ShiftHead; 4],
     toggle: usize,
     since: f32,
     grid: f64,
@@ -269,7 +274,7 @@ pub struct PitchShifter {
 
 impl Default for PitchShifter {
     fn default() -> Self {
-        Self { heads: [ShiftHead::default(); 2], toggle: 0, since: f32::MAX, grid: 0.0, grid_valid: false }
+        Self { heads: [ShiftHead::default(); 4], toggle: 0, since: f32::MAX, grid: 0.0, grid_valid: false }
     }
 }
 
@@ -325,6 +330,12 @@ impl PitchShifter {
             self.grid -= k * period;
         }
 
+        let old = self.heads[self.toggle];
+        if old.active && TRI_PEAK - old.g.abs() > 0.0 {
+            let weight = |h: &ShiftHead| if h.active { TRI_PEAK - h.g.abs() } else { -1.0 };
+            let spare = if weight(&self.heads[2]) <= weight(&self.heads[3]) { 2 } else { 3 };
+            self.heads[spare] = old;
+        }
         self.heads[self.toggle] = ShiftHead { pos: self.grid, g: -TRI_PEAK, slope: p.slope, active: true };
         self.toggle ^= 1;
     }
@@ -519,6 +530,28 @@ mod tests {
             let cents = 1200.0 * (f / expect).log2();
             assert!(cents.abs() < 8.0, "shift {shift}: esperado {expect} Hz, medido {f} Hz");
         }
+    }
+
+    #[test]
+    fn voice_to_unvoiced_switch_does_not_cut_sounding_grains() {
+        // Fim de glissando: harmonia +4 st num periodo longo vira unison com P = 128 (como o
+        // DSP faz ao perder o pitch). Nenhum grao ainda audivel pode ser cortado.
+        let sr = 44_100.0;
+        let f0 = 110.0_f32;
+        let mut ring = vec![0.0; RING_SIZE];
+        let mut sh = PitchShifter::default();
+        let voiced = ShiftParams::new(sr / f0, 4.0, 1.0);
+        let unvoiced = ShiftParams::new(128.0, 0.0, 1.0);
+        let mut out = Vec::new();
+        for i in 0..12_000usize {
+            ring[i & RING_MASK] = (2.0 * PI * f0 * i as f32 / sr).sin() * 0.5;
+            let p = if i < 8_000 { &voiced } else { &unvoiced };
+            out.push(sh.step(&ring, i as u64, p, 0.0));
+        }
+        let jump = |r: std::ops::Range<usize>| r.map(|i| (out[i + 1] - out[i]).abs()).fold(0.0_f32, f32::max);
+        let steady = jump(4_000..8_000);
+        let switch = jump(8_000..9_000);
+        assert!(switch < steady * 1.5, "salto na troca {switch} vs regime {steady}");
     }
 
     #[test]
