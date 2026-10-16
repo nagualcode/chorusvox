@@ -186,8 +186,52 @@ fn read_wav_mono(path: &str) -> std::io::Result<(Vec<f32>, u32)> {
     Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Chunk data ausente"))
 }
 
+/// Escreve os 100 programas de fabrica do HV10 como presets de fabrica do truce
+/// (`presets/<modo>/<id nome>.preset`), empacotados no bundle por `cargo truce install`.
+fn write_factory_presets(dir: &str) -> std::io::Result<()> {
+    use decabuddy::harmony::HarmonyMode;
+    use decabuddy::programs::factory_programs;
+    use decabuddy::truce_integration::{program_values, ChorusVoxParams};
+    let params = ChorusVoxParams::default();
+    for (i, prog) in factory_programs().iter().enumerate() {
+        let category = match prog.params.harmony.mode {
+            HarmonyMode::Style => "Style",
+            HarmonyMode::Chord => "Chord",
+            HarmonyMode::Modal => "Modal",
+            HarmonyMode::FlexiChord => "FlexiChord",
+            _ => "MIDI",
+        };
+        let folder = format!("{dir}/{category}");
+        std::fs::create_dir_all(&folder)?;
+        let display = prog.display_name();
+        let stem: String = display.chars().map(|c| if c.is_ascii_alphanumeric() || c == ' ' || c == '+' || c == '-' { c } else { '_' }).collect();
+        let mut toml = format!(
+            "name = \"{}\"\ncategory = \"{}\"\nauthor = \"Akai HV10 factory\"\ncomment = \"HV10 factory program {} (Operator's Manual, Preset Program List)\"\ndefault = {}\n\n[params]\n",
+            display, category, prog.id, i == 0
+        );
+        for (field, _, value) in program_values(&params, &prog.params) {
+            toml.push_str(&format!("{field} = {value}\n"));
+        }
+        let path = format!("{folder}/{stem}.preset");
+        // Preserva o uuid carimbado por `cargo truce install` em execucoes anteriores.
+        if let Ok(old) = std::fs::read_to_string(&path) {
+            if let Some(line) = old.lines().find(|l| l.starts_with("uuid")) {
+                toml = format!("{line}\n{toml}");
+            }
+        }
+        std::fs::write(path, toml)?;
+    }
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
+    if args.len() >= 2 && args[1] == "presets" {
+        let dir = args.get(2).map_or("presets", String::as_str);
+        write_factory_presets(dir)?;
+        println!("100 presets de fabrica escritos em {dir}/");
+        return Ok(());
+    }
     let (input, sr) = if args.len() >= 2 {
         read_wav_mono(&args[1])?
     } else {

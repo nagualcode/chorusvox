@@ -12,7 +12,21 @@
 
 ---
 
-## ⚡ What's New in v0.3.1
+## ⚡ What's New in v0.3.2
+
+* **Style tables from the HV10 manual.** All 16 tables were transcribed note by note from the manual's "Preset styles" score (Appendix p. 31):
+  * 13 match Akai's DecaBuddy software;
+  * **3H**, **5H** and the B note of **5F** were different on the hardware and are now corrected.
+* **The 100 factory programs** (banks 01–50, A/B) from the manual's Preset Program List:
+  * listed as **factory presets** in the DAW's preset menu;
+  * available in the editor's **PROGRAM** selector;
+  * recalled by **MIDI Program Change** on the base channel (PC 1–50 → 01A–50A, PC 51–100 → 01B–50B). The editor's controls follow when it is open.
+  * A new instance opens on program 01A.
+* **CHORD mode** with the 8 preset chords documented in the manual (Normal, Diatonic, 7TH, Com-Dim, Diminish, Augment, IIm7/V, 6/9):
+  * a **Chord Voicing** per part: UN, L8, H8, HI, LO;
+  * L1/H1 take the nearest chord tone above or below the voice; L2/H2 take the second.
+
+## v0.3.1
 
 * **Fixed upper harmonies jumping one or two octaves too high:**
   * the pitch detector sometimes locked onto the 2nd or 3rd harmonic of vowels like "o" and "u" (≈19% of the time on a test phrase). The period-locked engine then put the whole harmony an octave or more up;
@@ -82,6 +96,7 @@ Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ablet
    cargo truce uninstall --vst3 --au2
    cargo test --release                 # DSP / harmony test suite
    cargo run --release --bin decabuddy_cli [in.wav] [out.wav]   # offline render + benchmark
+   cargo run --release --bin decabuddy_cli presets presets      # regenerate the 100 factory presets
    ```
 
 ---
@@ -107,7 +122,7 @@ Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ablet
 
 | Control | Range | Description |
 | :--- | :--- | :--- |
-| **Mode** | STYLE, MODAL, FLEXICHORD, MONO CHN., WAIT ALL, PRIORITY, SMART | How harmonies are generated (see below). |
+| **Mode** | STYLE, MODAL, FLEXICHORD, MONO CHN., WAIT ALL, PRIORITY, SMART, CHORD | How harmonies are generated (see below). |
 | **Key** | C/Am … B/G#m | Key used by STYLE and MODAL. |
 | **Sub** / **Sub Key** | On/Off, key | HV10 Sub Parameter. While Sub is on, Sub Key and each part's Sub Style replace Key and Style. MIDI CC80/81 toggle it like the PROGRAM footswitches. |
 | **Tune** | 427–453 Hz | TUNE ADJUST: reference pitch for detection and P.CORRECT. |
@@ -134,6 +149,7 @@ Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ablet
 ### Harmony modes
 
 * **STYLE:** Key + Style per part. Notes left unassigned in a table follow the DSP rule: a gap of 2+ notes is filled half from each neighbor; a single-note gap uses the neighbor in the direction of the pitch deviation.
+* **CHORD:** Key + **Preset Chord** + **Chord Voicing** per part (UN, L8, H8, HI, LO). Every scale note of the Key gets its chord (e.g. Normal: C, Dm, Em, F, G, Am, Bm♭5); chromatic notes follow the nearest assigned neighbor.
 * **MODAL:** Key + **Template** (degrees 1–7; 3 and 7 accept `m`/`M`) + Modal voicing per part. The chord root comes from a MIDI note on the base channel and is latched.
 * **FLEXICHORD:** play a 3+ note chord in any inversion. Harmonies take the nearest chord tones below/above the sung note, with voicing `LO LO LO HI`, `LO LO HI HI` or `LO HI HI HI`. Notes that don't form a known chord are ignored. The chord is latched.
 * **MONO CHN.:** each part plays the note received on its own channel (base+1 … base+4).
@@ -153,6 +169,7 @@ In the MIDI note modes (MONO CHN., WAIT ALL, PRIORITY) the harmony is tuned exac
 | :--- | :--- |
 | Note On/Off | MODAL root, FLEXICHORD/SMART chords, MONO CHN./WAIT ALL/PRIORITY notes |
 | CC7 / CC10 / CC12 / CC13 | LEVEL / PAN / FORMANT / P.CORRECT of the part on that channel (base = ORIGIN, base+1…4 = L2…H2) |
+| Program Change | Factory program (PC 1–50 = 01A–50A, 51–100 = 01B–50B) |
 | CC11 | MASTER LVL |
 | CC80 / CC81 | Sub Parameter (PROGRAM A/B footswitch) |
 | CC82 | BYPASS |
@@ -182,17 +199,17 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
 | :--- | :--- |
 | Chips (ADSP-2186M, PCM3003E, H8/3644, NJM4558L, RY-9WK) and 44.1 kHz rate (11.2896 MHz crystal) | HV10 service manual, `reference/78b793.pdf` |
 | Controls, ranges, modes, MIDI channels and CCs, Normal Bypass, factory program 01A (default) | HV10 operator's manual, `reference/a420d5.pdf` |
-| STYLE tables (16 lower + 16 upper) | Text tables inside `DecaBuddy.dll` v1.02; checked against the manual's 3A/3E examples |
+| STYLE tables (16 lower + 16 upper) | "Preset styles" score in the HV10 operator's manual (p. 31); cross-checked with `DecaBuddy.dll` v1.02 |
+| Factory programs and CHORD shapes | "Preset Program List" (pp. 28–29) and "Preset chords" (p. 30) in the operator's manual |
 | Shifter, window shape and length, formant law, random-delay LFOs, unison gain/pan/detune, P.CORRECT formula, unvoiced behavior, pan law, 50 ms voicing hold, 2.5-semitone jump confirmation | Reverse engineering of the DSP engine in `DecaBuddy.dll` v1.02 (Akai's software version, ported from DSP code) |
 | Pitch-period rule (window 2× period, shortened only for upward shifts) | IVL Technologies patent US 5,567,901 |
 
 **Known approximations:**
 * **Pitch detection:** uses YIN, a more robust detector. The original uses a zero-crossing/lobe-similarity tracker with a 500 Hz pre-filter. Pitch updates are still stepwise and per analysis, like the DSP.
-* **Style names:** mapping 3H → "7th Major" and 5H → "7th Minor" is inferred. 3A–3G and 5A–5G follow the DLL order.
 * **Fixed-delay length:** the D1–D9 length is scaled from the DSP's random-delay centers. The manual only says "the higher, the longer".
-* **LEVEL steps:** the 3 dB LEVEL steps are an estimate.
-* **CHORD mode:** not implemented. The list of 50 factory chords is not in the available documentation.
-* **Factory programs:** the 100 factory programs are not included. Only program 01A is the default.
+* **LEVEL steps:** the 3 dB LEVEL steps are an estimate. Akai's DecaBuddy software uses a dB control (−24…0 dB), so it does not reveal the hardware's 0–9 curve.
+* **CHORD mode:** the manual mentions 50 preset chords, but its appendix only documents 8; those 8 are implemented. How chord tones are assigned to the four parts is inferred from the manual's examples.
+* **Factory programs:** a few fields from the manual are not modeled: P.CORRECT on the original voice (programs 21–30), Sub voicing outside STYLE mode, and the Sub template/priority. The printed column header says "L1 L2", but the FLEXICHORD and PRIORITY voicings show the real order is L2, L1.
 * **Third shifter head:** one extra head avoids cutting an audible grain when the pitch jumps. The original alternates two.
 
 ---
