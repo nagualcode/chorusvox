@@ -12,6 +12,59 @@
 
 ---
 
+## 🚀 Quick Start: how to use it
+
+Put ChorusVox on a **vocal track** as an insert effect and sing. The plugin listens to your voice and adds up to **4 harmony voices** that follow you as you sing.
+
+### What each part of the screen does
+
+* **PROGRAM** (top): pick one of the 100 factory sounds. This is the fastest way to start. **01A** ("3A Two Part") adds a doubled third above your voice, spread left and right.
+* **Mode:** where the harmony notes come from.
+  * **STYLE** is the easiest. Set the **Key** of your song, and each voice harmonizes following a style. No keyboard is needed.
+  * **SMART**, **MODAL**, **FLEXICHORD** and **CHORD** follow chords you play on a **MIDI keyboard**. **MONO CHN.**, **WAIT ALL** and **PRIORITY** sing the exact notes you play.
+* **Key:** the key of your song (C/Am, D/Bm…). Used by STYLE, MODAL, CHORD and SMART.
+* **The 5 voice strips:**
+  * **ORIGIN** is your own voice.
+  * **H1 and H2** are harmonies **above** you.
+  * **L1 and L2** are harmonies **below** you.
+* **Buddies** (on each strip):
+  * `--` switches the voice off;
+  * `ON` switches it on;
+  * `ON+UN` also adds a doubled ("unison") copy for a thicker, choir-like sound;
+  * `FX` (ORIGIN only) keeps only the doubled copy of your voice.
+* **Style** (STYLE mode): which interval the voice sings.
+  * `3A`–`3H`: a voice around a **third**. `3E` is the plain scale third; the others vary a few notes to fit the main chords.
+  * `5A`–`5H`: a voice around a **fifth or sixth**. `5E` is always a perfect fifth.
+  * `8v`: one octave. `UN`: the same note (doubling).
+  * `U1`–`U9`: your own styles, edited in the **USER STYLES** tab.
+* **Knobs on each strip:**
+  * **Level** sets the volume and **Pan** the stereo position.
+  * **Formant** changes the voice character without changing the note: negative sounds bigger and deeper, positive smaller and brighter.
+  * **P.Correct** snaps the harmony to exact pitch: `--` follows your natural pitch, 9 is fully locked.
+  * **R.Delay** makes the voice start slightly late. **D** is a fixed delay; **R** is a random delay that sounds like real singers.
+* **Sub / Sub Key / Sub Style:** a second Key and set of Styles that you switch to with one button. Use it to change the harmony for the chorus or a key change. Automate it in your DAW, or send MIDI CC80.
+* **Master** is the output volume, **Input** the input gain, **Tune** the reference pitch (440 Hz by default), and **Bypass** turns the effect off.
+
+### Example: a third and a fifth above your voice (no keyboard)
+
+1. **Mode** = STYLE, **Key** = the key of your song (e.g. C/Am).
+2. **H1**: Buddies `ON`, Style `3A`.
+3. **H2**: Buddies `ON`, Style `5A`.
+4. **L1** and **L2**: Buddies `--`.
+5. Sing. When you sing C you hear E and G, and when you sing D you hear G and B. The result is a close three-part harmony.
+
+Tips:
+* For a bigger chorus sound, set the Buddies to `ON+UN` and pan H1 left and H2 right.
+* For a harmony below you as well, switch L1 on with Style `3A`.
+
+### Example: harmonies that follow your keyboard chords
+
+1. **Mode** = SMART, **Key** = the key of your song.
+2. Send a MIDI track to the plugin (on its MIDI channel, 1 by default) and play chords while you sing, or record them.
+3. The harmony voices sing the chord notes closest to your melody and change when the chord changes.
+
+---
+
 ## ⚡ What's New in v0.3.2
 
 * **Style tables from the HV10 manual.** All 16 tables were transcribed note by note from the manual's "Preset styles" score (Appendix p. 31):
