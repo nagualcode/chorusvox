@@ -3,7 +3,8 @@
 //! DecaBuddy original: azul, amarelo, verde e laranja); so os controles do modo ativo aparecem.
 
 use crate::scales::{StyleBank, StyleId, StyleLookup};
-use crate::truce_integration::{ChorusVoxParams, ChorusVoxParamsParamId as P};
+use crate::programs::{factory_programs, FactoryProgram};
+use crate::truce_integration::{program_values, ChorusVoxParams, ChorusVoxParamsParamId as P};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use std::collections::HashMap;
 use truce::params::ParamInfo;
@@ -50,6 +51,7 @@ struct PartIds {
     pcorr: u32,
     rdelay: u32,
     prio: u32,
+    chord_vc: u32,
 }
 
 fn part_ids(i: usize) -> PartIds {
@@ -60,7 +62,8 @@ fn part_ids(i: usize) -> PartIds {
         _ => [P::H2Buddies, P::H2Style, P::H2SubStyle, P::H2Modal, P::H2Formant, P::H2Level, P::H2Pan, P::H2Pcorr, P::H2Rdelay, P::H2Prio],
     };
     let [buddies, style, sub_style, modal, formant, level, pan, pcorr, rdelay, prio] = ids.map(u32::from);
-    PartIds { buddies, style, sub_style, modal, formant, level, pan, pcorr, rdelay, prio }
+    let chord_vc = u32::from([P::L2ChordVc, P::L1ChordVc, P::H1ChordVc, P::H2ChordVc][i.min(3)]);
+    PartIds { buddies, style, sub_style, modal, formant, level, pan, pcorr, rdelay, prio, chord_vc }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,11 +77,23 @@ pub struct HvGui {
     by_name: HashMap<&'static str, u32>,
     tab: Tab,
     user_sel: usize,
+    programs: Vec<FactoryProgram>,
+    /// Ultimo token de Program Change ja aplicado aos parametros do host.
+    last_program_token: f32,
+    current_program: Option<usize>,
 }
 
 impl Default for HvGui {
     fn default() -> Self {
-        Self { infos: HashMap::new(), by_name: HashMap::new(), tab: Tab::Voices, user_sel: 0 }
+        Self {
+            infos: HashMap::new(),
+            by_name: HashMap::new(),
+            tab: Tab::Voices,
+            user_sel: 0,
+            programs: Vec::new(),
+            last_program_token: 0.0,
+            current_program: None,
+        }
     }
 }
 
@@ -254,10 +269,49 @@ impl HvGui {
     // Secoes
     // -----------------------------------------------------------------------------------------
 
+    /// Aplica um programa de fabrica aos parametros do host (GLOBAL e User Styles preservados).
+    fn apply_program(&mut self, state: &Ctx, index: usize) {
+        let Some(prog) = self.programs.get(index) else { return };
+        for (_, id, value) in program_values(state.params(), &prog.params) {
+            self.set_plain(state, id, value);
+        }
+        self.current_program = Some(index);
+    }
+
+    /// MIDI Program Change: o DSP ja aplicou o programa ao som; aqui os controles acompanham.
+    fn follow_program_change(&mut self, state: &Ctx) {
+        let token = state.get_meter(P::MeterProgram);
+        if token > 0.0 && token != self.last_program_token {
+            self.last_program_token = token;
+            let index = (token as u32 % 1000).saturating_sub(1) as usize;
+            self.apply_program(state, index);
+        }
+    }
+
     fn header(&mut self, ui: &mut egui::Ui, state: &Ctx) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("DECABUDDY").size(15.0).strong().color(TEXT));
-            ui.label(egui::RichText::new("HV10 harmony processor").size(10.0).color(DIM));
+            ui.label(egui::RichText::new("HV10").size(10.0).color(DIM));
+            ui.add_space(10.0);
+            let current = self
+                .current_program
+                .and_then(|i| self.programs.get(i))
+                .map_or_else(|| "PROGRAM".to_string(), FactoryProgram::display_name);
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt("hv-program")
+                .selected_text(egui::RichText::new(current).size(11.0).color(ACCENT))
+                .width(190.0)
+                .height(360.0)
+                .show_ui(ui, |ui| {
+                    for (i, prog) in self.programs.iter().enumerate() {
+                        if ui.selectable_label(self.current_program == Some(i), prog.display_name()).clicked() {
+                            chosen = Some(i);
+                        }
+                    }
+                });
+            if let Some(i) = chosen {
+                self.apply_program(state, i);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 Self::meter(ui, state, &[P::MeterOutL.into(), P::MeterOutR.into()], 16.0);
                 ui.label(egui::RichText::new("OUT").size(9.0).color(DIM));
@@ -326,6 +380,12 @@ impl HvGui {
                         4 => hint(ui, "harmony waits for one held note per active part"),
                         5 => hint(ui, "notes assigned in playing order (Priority per part)"),
                         6 => hint(ui, "SMART: modern chord engine with voice leading (not on the HV10)"),
+                        7 => {
+                            ui.horizontal(|ui| {
+                                self.dropdown(ui, state, P::Chord.into(), "PRESET CHORD", 120.0, GLOBAL);
+                                hint(ui, "chord of each scale note (Key); voicing per part");
+                            });
+                        }
                         _ => hint(ui, "STYLE: harmony from Key + Style; Sub swaps Key / Style"),
                     }
                 });
@@ -387,6 +447,10 @@ impl HvGui {
                                 3 => hint(ui, &format!("MIDI channel = base + {}", v)),
                                 2 => hint(ui, "nearest chord tones (FlexiChord voicing)"),
                                 4 => hint(ui, "held notes, by pitch order"),
+                                7 => {
+                                    ui.label(egui::RichText::new("CHORD VOICING").size(9.0).color(DIM));
+                                    self.segmented(ui, state, ids.chord_vc, &["UN", "L8", "H8", "HI", "LO"], inner, color);
+                                }
                                 _ => hint(ui, "SMART chord tone"),
                             }
                         }
@@ -561,6 +625,10 @@ fn small_button(ui: &mut egui::Ui, text: &str, width: f32) -> bool {
 impl EditorUi<ChorusVoxParams> for HvGui {
     fn ui(&mut self, ui: &mut egui::Ui, state: &Ctx) {
         self.ensure_infos(state);
+        if self.programs.is_empty() {
+            self.programs = factory_programs();
+        }
+        self.follow_program_change(state);
         egui::Frame::NONE.fill(BG).inner_margin(10).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);

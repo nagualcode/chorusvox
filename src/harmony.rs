@@ -19,6 +19,76 @@ pub enum HarmonyMode {
     Priority,
     /// Modo moderno (nao existe no HV10): acorde inteligente com conducao de vozes.
     Smart,
+    /// CHORD: um acorde de fabrica define a harmonia de todas as partes.
+    Chord,
+}
+
+/// VOICING do modo CHORD: UN, L8, H8, HI, LO.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChordVoicing {
+    Un,
+    OctLow,
+    OctHigh,
+    Hi,
+    Lo,
+}
+
+impl ChordVoicing {
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            1 => ChordVoicing::OctLow,
+            2 => ChordVoicing::OctHigh,
+            3 => ChordVoicing::Hi,
+            4 => ChordVoicing::Lo,
+            _ => ChordVoicing::Un,
+        }
+    }
+}
+
+/// Acordes de fabrica documentados no manual do HV10 ("Preset chords", pag. 30). Para cada nota
+/// da escala de KEY (C, D, E, F, G, A, B em C/Am) o acorde e dado pelos intervalos a partir da
+/// nota cantada; notas cromaticas ficam sem atribuicao.
+pub const CHORD_NAMES: [&str; 8] = ["Normal", "Diatonic", "7TH", "Com-Dim", "Diminish", "Augment", "IIm7/V", "6/9"];
+
+const MAJ: &[u8] = &[0, 4, 7];
+const MIN: &[u8] = &[0, 3, 7];
+const DIM: &[u8] = &[0, 3, 6];
+const MAJ7: &[u8] = &[0, 4, 7, 11];
+const MIN7: &[u8] = &[0, 3, 7, 10];
+const DOM7: &[u8] = &[0, 4, 7, 10];
+const HDIM7: &[u8] = &[0, 3, 6, 10];
+
+/// Intervalos do acorde `chord` (0..8) sobre o grau diatonico `degree` (0 = I .. 6 = VII).
+fn chord_shape(chord: u8, degree: usize) -> &'static [u8] {
+    match chord {
+        // Normal: C, Dm, Em, F, G, Am, Bm(b5)
+        0 => [MAJ, MIN, MIN, MAJ, MAJ, MIN, DIM][degree],
+        // Diatonic: CMaj7, Dm7, Em7, FMaj7, G7, Am7, Bm7(b5)
+        1 => [MAJ7, MIN7, MIN7, MAJ7, DOM7, MIN7, HDIM7][degree],
+        // 7TH: C7, D7, E7, F7, G7, A7, B7
+        2 => DOM7,
+        // Com-Dim: triade maior meio tom abaixo sobre a nota (B/C, C#/D, ...)
+        3 => &[0, 3, 6, 11],
+        // Diminish: Cdim7, Ddim7, ...
+        4 => &[0, 3, 6, 9],
+        // Augment: Caug, Daug, ...
+        5 => &[0, 4, 8],
+        // IIm7/V: Gm7/C, Am7/D, ... (m7 uma quinta acima sobre a nota)
+        6 => &[0, 2, 5, 7, 10],
+        // 6/9: C6/9, D6/9, ...
+        _ => &[0, 2, 4, 7, 9],
+    }
+}
+
+/// Classes de altura do acorde de fabrica para a nota cantada (None = nota cromatica).
+pub fn preset_chord_mask(chord: u8, key: u8, note: i32) -> Option<[bool; 12]> {
+    let rel = (note - (key % 12) as i32).rem_euclid(12);
+    let degree = MAJOR_SCALE.iter().position(|&d| d == rel)?;
+    let mut mask = [false; 12];
+    for &iv in chord_shape(chord, degree) {
+        mask[(note + iv as i32).rem_euclid(12) as usize] = true;
+    }
+    Some(mask)
 }
 
 /// VOICING do modo MODAL: UN, 8L, 8H, L1..L8, H1..H8.
@@ -71,6 +141,9 @@ pub struct HarmonySettings {
     /// Graus 1..7 do TEMPLATE.
     pub template: [TemplateDegree; 7],
     pub flexi_voicing: FlexiVoicing,
+    /// CHORD: acorde de fabrica (0..8) e VOICING de cada parte.
+    pub chord: u8,
+    pub chord_voicing: [ChordVoicing; NUM_PARTS],
     /// PRIORITY: ordem (1..4) da nota recebida atribuida a cada parte L2, L1, H1, H2.
     pub priority_rank: [u8; NUM_PARTS],
     /// Partes ligadas em BUDDIES (usado por WAIT ALL).
@@ -89,6 +162,8 @@ impl Default for HarmonySettings {
                 TemplateDegree::On, TemplateDegree::Off, TemplateDegree::Off,
             ],
             flexi_voicing: FlexiVoicing::LlHh,
+            chord: 0,
+            chord_voicing: [ChordVoicing::Hi; NUM_PARTS],
             priority_rank: [1, 2, 3, 4],
             part_on: [false, false, true, true],
         }
@@ -387,6 +462,17 @@ impl HarmonyEngine {
                 nth_chord_tone(&mask, note, k, up)
             }
             HarmonyMode::Smart => self.smart_shift(p, settings.key, note),
+            HarmonyMode::Chord => {
+                // L1/H1 usam a 1a nota do acorde acima/abaixo da voz; L2/H2 a 2a.
+                let rank = if p == 1 || p == 2 { 1 } else { 2 };
+                match settings.chord_voicing[p] {
+                    ChordVoicing::Un => Some(0),
+                    ChordVoicing::OctLow => Some(-12),
+                    ChordVoicing::OctHigh => Some(12),
+                    ChordVoicing::Hi => nth_chord_tone(&preset_chord_mask(settings.chord, settings.key, note)?, note, rank, true),
+                    ChordVoicing::Lo => nth_chord_tone(&preset_chord_mask(settings.chord, settings.key, note)?, note, rank, false),
+                }
+            }
             _ => None,
         }
     }
@@ -394,7 +480,7 @@ impl HarmonyEngine {
     /// Indica se a parte tem harmonia definida (para silencia-la quando nao ha alvo MIDI).
     pub fn part_available(&self, settings: &HarmonySettings, styles: &StyleBank, p: usize) -> bool {
         match settings.mode {
-            HarmonyMode::Style => true,
+            HarmonyMode::Style | HarmonyMode::Chord => true,
             HarmonyMode::MonoChn | HarmonyMode::WaitAll | HarmonyMode::Priority => self.absolute_note(settings, p).is_some(),
             _ => (0..12).any(|n| self.interval(settings, styles, p, 60 + n).is_some()),
         }
@@ -545,6 +631,23 @@ mod tests {
         assert!(modal_chord_mask(&t, 0, 62)[5]);
         t[2] = TemplateDegree::Major;
         assert!(modal_chord_mask(&t, 0, 62)[6]);
+    }
+
+    #[test]
+    fn chord_normal_two_higher_two_lower() {
+        // Manual: CHORD 01 Normal, VOICING L2/L1 = HI e H1/H2 = LO -> 2 harmonias acima e 2 abaixo.
+        let mut eng = HarmonyEngine::default();
+        let styles = StyleBank::default();
+        let mut s = HarmonySettings { mode: HarmonyMode::Chord, chord: 0, ..Default::default() };
+        s.chord_voicing = [ChordVoicing::Hi, ChordVoicing::Hi, ChordVoicing::Lo, ChordVoicing::Lo];
+        // Cantando C: acorde C (C E G) -> L2 = G acima, L1 = E acima, H1 = G abaixo, H2 = E abaixo
+        assert_eq!(rounded(eng.shifts(&s, &styles, 60.0, FULL_CORR)), [Some(7), Some(4), Some(-5), Some(-8)]);
+        // Cantando D: Dm (D F A)
+        assert_eq!(rounded(eng.shifts(&s, &styles, 62.0, FULL_CORR)), [Some(7), Some(3), Some(-5), Some(-9)]);
+        // 7TH sobre G: G7 (G B D F)
+        s.chord = 2;
+        s.chord_voicing = [ChordVoicing::Hi; 4];
+        assert_eq!(rounded(eng.shifts(&s, &styles, 67.0, FULL_CORR)), [Some(7), Some(4), Some(4), Some(7)]);
     }
 
     #[test]

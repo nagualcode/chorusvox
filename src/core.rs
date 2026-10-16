@@ -7,6 +7,7 @@ use crate::dsp::{
     ScopedFtzDaz, ShiftParams, RING_MASK, RING_SIZE,
 };
 use crate::harmony::{HarmonyEngine, HarmonySettings, NUM_PARTS};
+use crate::programs::{factory_programs, program_change_index, FactoryProgram};
 use crate::scales::{StyleBank, StyleId};
 
 /// BUDDIES de uma parte de harmonia: desligada, ligada, ligada + unison.
@@ -93,7 +94,7 @@ pub struct Hv10Params {
 }
 
 impl Default for Hv10Params {
-    /// Programa 01A de fabrica (Preset Program List): voz original + 3A em H1 e H2.
+    /// Programa 01A de fabrica (Preset Program List): voz original com unison + 3A em H1 e H2.
     fn default() -> Self {
         let off = PartParams { buddies: Buddies::Off, formant: 0, level: 0.0, pan: 0.0, p_correct: 0.0, rand_delay: RandDelay::Off };
         Self {
@@ -103,15 +104,15 @@ impl Default for Hv10Params {
             sub_styles: [StyleId::Un, StyleId::Un, StyleId::S3E, StyleId::S3E],
             tune_hz: 440.0,
             input_gain_db: 0.0,
-            master_level: 9.0,
+            master_level: 7.0,
             bypass: false,
             midi_base_channel: 1,
-            origin: OriginParams { buddies: OriginBuddies::On, formant: 0, level: 9.0, pan: 0.0, rand_delay: RandDelay::Off },
+            origin: OriginParams { buddies: OriginBuddies::OnUnison, formant: 0, level: 9.0, pan: 0.0, rand_delay: RandDelay::Off },
             parts: [
                 off,
                 off,
-                PartParams { buddies: Buddies::On, formant: 3, level: 6.0, pan: -8.0, p_correct: 1.0, rand_delay: RandDelay::Random(4) },
-                PartParams { buddies: Buddies::On, formant: 6, level: 6.0, pan: 8.0, p_correct: 1.0, rand_delay: RandDelay::Random(7) },
+                PartParams { buddies: Buddies::OnUnison, formant: 3, level: 6.0, pan: -8.0, p_correct: 1.0, rand_delay: RandDelay::Random(4) },
+                PartParams { buddies: Buddies::OnUnison, formant: 6, level: 6.0, pan: 8.0, p_correct: 1.0, rand_delay: RandDelay::Random(7) },
             ],
         }
     }
@@ -180,6 +181,12 @@ impl PartDsp {
 
 pub struct DecaBuddyProcessor {
     pub sample_rate: f32,
+    /// Os 100 programas de fabrica (MIDI Program Change).
+    pub programs: Vec<FactoryProgram>,
+    /// Ultimo programa recebido por Program Change, publicado para a interface:
+    /// sequencia * 1000 + indice + 1 (0 = nenhum).
+    pub program_token: f32,
+    program_seq: u32,
     pub params: Hv10Params,
     pub styles: StyleBank,
     pub harmony: HarmonyEngine,
@@ -216,6 +223,9 @@ impl DecaBuddyProcessor {
         let sr = sample_rate.max(8000.0);
         let mut p = Self {
             sample_rate: sr,
+            programs: factory_programs(),
+            program_token: 0.0,
+            program_seq: 0,
             params: Hv10Params::default(),
             styles: StyleBank::default(),
             harmony: HarmonyEngine::default(),
@@ -483,7 +493,19 @@ impl DecaBuddyProcessor {
     #[inline]
     fn pitch_frame_active(&self) -> bool { self.pitch.is_active() }
 
-    /// Mensagens MIDI (implementacao do HV10: notas, CC7/10/11/12/13, 80/81/82, 64, 120/123).
+    /// Carrega um programa de fabrica (0..100 = 01A, 01B, ... 50B). Parametros GLOBAIS do HV10
+    /// (TUNE, canal MIDI, nivel de entrada, BYPASS) nao fazem parte do programa.
+    pub fn load_program(&mut self, index: usize) {
+        let Some(prog) = self.programs.get(index) else { return };
+        let keep = (self.params.tune_hz, self.params.midi_base_channel, self.params.input_gain_db, self.params.bypass);
+        self.params = prog.params.clone();
+        (self.params.tune_hz, self.params.midi_base_channel, self.params.input_gain_db, self.params.bypass) = keep;
+        self.program_seq = self.program_seq.wrapping_add(1) % 1000;
+        self.program_token = (self.program_seq * 1000 + index as u32 + 1) as f32;
+    }
+
+    /// Mensagens MIDI (implementacao do HV10: notas, Program Change, CC7/10/11/12/13,
+    /// 80/81/82, 64, 120/123).
     pub fn handle_midi_event(&mut self, status: u8, data1: u8, data2: u8) {
         let kind = status & 0xF0;
         let ch = status & 0x0F;
@@ -491,6 +513,12 @@ impl DecaBuddyProcessor {
         match kind {
             0x90 if data2 > 0 => self.harmony.midi.note_on(ch, data1),
             0x80 | 0x90 => self.harmony.midi.note_off(ch, data1),
+            // Program Change no canal base: PC 1-50 -> 01A-50A, 51-100 -> 01B-50B
+            0xC0 if self.harmony.midi.channel_offset(ch) == 0 => {
+                if let Some(i) = program_change_index(data1) {
+                    self.load_program(i);
+                }
+            }
             0xB0 => {
                 let off = self.harmony.midi.channel_offset(ch) as usize;
                 let norm = data2 as f32 / 127.0;
@@ -604,6 +632,8 @@ mod tests {
         let sr = 44_100.0;
         let mut proc = DecaBuddyProcessor::new(sr);
         for p in 0..NUM_PARTS { proc.params.parts[p].buddies = Buddies::Off; }
+        proc.params.origin.buddies = OriginBuddies::On;
+        proc.params.master_level = 9.0;
         let input = voice(220.0, sr, 16_384);
         let (l, r) = render(&mut proc, &input);
         // ORIGIN nivel 9 centro: -3 dB por canal (lei de pan do DSP). Alem da quantizacao de
@@ -658,6 +688,19 @@ mod tests {
         assert!(proc.params.bypass);
         proc.handle_midi_event(0xB0, 80, 127);
         assert!(proc.params.sub_active);
+    }
+
+    #[test]
+    fn program_change_loads_factory_program_but_keeps_globals() {
+        let mut proc = DecaBuddyProcessor::new(44_100.0);
+        proc.params.tune_hz = 445.0;
+        proc.handle_midi_event(0xC0, 48, 0); // PC 49 -> 49A Synth Vox
+        assert_eq!(proc.params.harmony.mode, HarmonyMode::Priority);
+        assert_eq!(proc.params.origin.buddies, OriginBuddies::Off);
+        assert_eq!(proc.params.tune_hz, 445.0);
+        assert_eq!(proc.program_token as u32 % 1000, 97);
+        proc.handle_midi_event(0xC3, 0, 0); // canal errado: ignorado
+        assert_eq!(proc.params.harmony.mode, HarmonyMode::Priority);
     }
 
     #[test]

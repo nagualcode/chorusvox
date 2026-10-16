@@ -1,45 +1,37 @@
 //! Tabelas de STYLE do Akai HV10 (UN, 8v, 3A–3H, 5A–5H, U1–U9).
 //!
-//! As 16 tabelas de harmonia vem das strings de STYLE EDIT do plugin Akai DecaBuddy v1.02
-//! (`reference/DecaBuddy.dll`, .data1 0x10026200..0x10026a80) e conferem com os exemplos do
-//! manual do HV10: 3A em C gera C->E, D->G, E->G, F->A, G->C, A->C, B->D e 3E gera D->F, G->B.
-//! O DLL rotula as 16 tabelas como "3rd Modal 1-5 / Har Min / Mel Min", "5th Modal 1-5 / Har Min /
-//! Mel Min" e "7th Major / Minor"; o HV10 as chama de 3A–3H e 5A–5H. A correspondencia 3A–3G e
-//! 5A–5G e direta pela ordem; 3H = 7th Major e 5H = 7th Minor e uma inferencia (nao documentada).
+//! Fonte: pagina "Preset styles" do manual de operacao do HV10 (apendice, pag. 31), transcrita da
+//! partitura nota a nota. 13 das 16 tabelas coincidem com as do plugin Akai DecaBuddy v1.02
+//! (3A–3E = "Modal 1-5", 3F/3G = menor harmonica/melodica, 5A–5G); o DLL diverge em 3H e 5H
+//! (la sao "7th Major/Minor") e na nota B do 5F (B->G# no DLL, B->F# no aparelho).
+//! Indice = nota cantada relativa a KEY (C..B em C/Am); valor = intervalo da harmonia ACIMA da voz.
+//! Nas partes L2/L1 (abaixo da voz) o HV10 usa a mesma nota uma oitava abaixo (valor - 12).
 
 pub type ScaleTable = [Option<i8>; 12];
 
 const N: Option<i8> = None;
 const fn s(v: i8) -> Option<i8> { Some(v) }
 
-/// Tabelas inferiores (partes L2/L1). Indice de entrada = classe de altura relativa a raiz da
-/// tabela (C para as tabelas modais, A para as menores). Valor = intervalo em semitons.
-const LOWER_TABLES: [ScaleTable; 16] = [
-    // 3rd Modal 1..5 (3A..3E)
-    [s(-8), N, s(-7), N, s(-9), s(-8), N, s(-7), N, s(-9), N, s(-9)],
-    [s(-7), N, s(-7), N, s(-9), s(-8), N, s(-7), N, s(-9), N, s(-9)],
-    [s(-8), N, s(-7), N, s(-9), s(-8), N, s(-8), N, s(-9), N, s(-9)],
-    [s(-8), N, s(-8), N, s(-9), s(-8), N, s(-8), N, s(-9), N, s(-9)],
-    [s(-8), N, s(-9), N, s(-9), s(-8), N, s(-8), N, s(-9), N, s(-9)],
-    // 3rd Harmonic Minor, Melodic Minor (3F, 3G) - raiz A
-    [s(-9), N, s(-9), s(-8), N, s(-9), N, s(-8), s(-8), N, N, s(-9)],
-    [s(-9), N, s(-9), s(-8), N, s(-7), N, s(-8), s(-8), N, s(-8), s(-9)],
-    // 5th Modal 1..5 (5A..5E)
-    [s(-5), N, s(-3), N, s(-4), s(-5), N, s(-3), N, s(-4), N, s(-4)],
-    [s(-5), N, s(-3), N, s(-4), s(-3), N, s(-3), N, s(-4), N, s(-4)],
-    [s(-5), N, s(-5), N, s(-4), s(-5), N, s(-5), N, s(-5), N, s(-4)],
-    [s(-3), N, s(-3), N, s(-4), s(-5), N, s(-3), N, s(-4), N, s(-4)],
-    [s(-5), N, s(-5), N, s(-5), s(-5), N, s(-5), N, s(-5), N, s(-5)],
-    // 5th Harmonic Minor, Melodic Minor (5F, 5G) - raiz A
-    [s(-5), N, s(-3), s(-3), N, s(-3), N, s(-5), s(-3), N, N, s(-4)],
-    [s(-5), N, s(-4), s(-3), N, s(-3), N, s(-5), s(-5), N, s(-5), s(-4)],
-    // 7th Major (3H) - raiz C, 7th Minor (5H) - raiz A
-    [s(-1), N, s(-2), N, s(-2), s(-1), N, s(-2), N, s(-2), N, s(-2)],
-    [s(-2), N, s(-2), s(-1), N, s(-2), N, s(-2), s(-1), N, s(-2), N],
+/// Tabelas superiores, na ordem 3A..3H, 5A..5H.
+const UPPER_TABLES: [ScaleTable; 16] = [
+    //  C      C#  D      D#  E      F      F#  G      G#     A      A#  B
+    [s(4), N, s(5), N, s(3), s(4), N, s(5), N, s(3), N, s(3)], // 3A
+    [s(5), N, s(5), N, s(3), s(4), N, s(5), N, s(3), N, s(3)], // 3B
+    [s(4), N, s(5), N, s(3), s(4), N, s(4), N, s(3), N, s(3)], // 3C
+    [s(4), N, s(4), N, s(3), s(4), N, s(4), N, s(3), N, s(3)], // 3D
+    [s(4), N, s(3), N, s(3), s(4), N, s(4), N, s(3), N, s(3)], // 3E
+    [s(4), N, s(3), N, s(4), s(4), N, N, s(3), s(3), N, s(3)], // 3F
+    [s(4), N, s(5), N, s(4), s(4), N, s(4), s(3), s(3), N, s(3)], // 3G
+    [s(5), N, s(3), N, s(5), s(4), N, s(4), N, s(3), N, s(5)], // 3H
+    [s(7), N, s(9), N, s(8), s(7), N, s(9), N, s(8), N, s(8)], // 5A
+    [s(7), N, s(9), N, s(8), s(9), N, s(9), N, s(8), N, s(8)], // 5B
+    [s(7), N, s(7), N, s(8), s(7), N, s(7), N, s(7), N, s(8)], // 5C
+    [s(9), N, s(9), N, s(8), s(7), N, s(9), N, s(8), N, s(8)], // 5D
+    [s(7), N, s(7), N, s(7), s(7), N, s(7), N, s(7), N, s(7)], // 5E
+    [s(9), N, s(9), N, s(7), s(9), N, N, s(8), s(7), N, s(7)], // 5F
+    [s(9), N, s(9), N, s(7), s(7), N, s(7), s(8), s(7), N, s(8)], // 5G
+    [s(9), N, s(9), N, s(8), s(7), N, s(9), N, s(8), N, s(7)], // 5H
 ];
-
-/// Raiz (classe de altura relativa a KEY) de cada tabela: 0 = C (maior), 9 = A (relativa menor).
-const TABLE_ROOT: [u8; 16] = [0, 0, 0, 0, 0, 9, 9, 0, 0, 0, 0, 0, 9, 9, 0, 9];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -70,13 +62,7 @@ impl StyleId {
     /// Indice nas tabelas de preset (0..16) para 3A..5H.
     fn table_index(self) -> Option<usize> {
         let i = self as usize;
-        match i {
-            2..=8 => Some(i - 2),       // 3A..3G -> 3rd Modal 1..5, Har Min, Mel Min
-            9 => Some(14),              // 3H -> 7th Major
-            10..=16 => Some(i - 10 + 7), // 5A..5G -> 5th Modal 1..5, Har Min, Mel Min
-            17 => Some(15),             // 5H -> 7th Minor
-            _ => None,
-        }
+        (2..=17).contains(&i).then(|| i - 2)
     }
 
     pub fn user_index(self) -> Option<usize> {
@@ -124,10 +110,9 @@ impl StyleBank {
             StyleId::Oct => StyleLookup::Interval(if lower { -12 } else { 12 }),
             _ => {
                 if let Some(t) = style.table_index() {
-                    let root = TABLE_ROOT[t] as i32;
-                    let pc = (input_note - key - root).rem_euclid(12) as usize;
-                    match LOWER_TABLES[t][pc] {
-                        Some(v) => StyleLookup::Interval(v as i32 + if lower { 0 } else { 12 }),
+                    let pc = (input_note - key).rem_euclid(12) as usize;
+                    match UPPER_TABLES[t][pc] {
+                        Some(v) => StyleLookup::Interval(v as i32 - if lower { 12 } else { 0 }),
                         None => StyleLookup::Unassigned,
                     }
                 } else if let Some(u) = style.user_index() {
@@ -199,6 +184,26 @@ mod tests {
         for (inp, out) in expect_3e {
             assert_eq!(bank.lookup(StyleId::S3E, false, 0, inp), StyleLookup::Interval(out - inp));
         }
+    }
+
+    #[test]
+    fn manual_tables_that_differ_from_the_dll() {
+        let bank = StyleBank::default();
+        let up = |st, n| match bank.lookup(st, false, 0, n) {
+            StyleLookup::Interval(v) => Some(n + v),
+            StyleLookup::Unassigned => None,
+        };
+        // 3H (pag. 31): C->F, D->F, E->A, F->A, G->B, A->C, B->E
+        let h3: Vec<_> = [60, 62, 64, 65, 67, 69, 71].iter().map(|&n| up(StyleId::S3H, n)).collect();
+        assert_eq!(h3, [Some(65), Some(65), Some(69), Some(69), Some(71), Some(72), Some(76)]);
+        // 5H: C->A, D->B, E->C, F->C, G->E, A->F, B->F#
+        let h5: Vec<_> = [60, 62, 64, 65, 67, 69, 71].iter().map(|&n| up(StyleId::S5H, n)).collect();
+        assert_eq!(h5, [Some(69), Some(71), Some(72), Some(72), Some(76), Some(77), Some(78)]);
+        // 5F: B->F# (o DLL dizia G#) e G sem atribuicao
+        assert_eq!(up(StyleId::S5F, 71), Some(78));
+        assert_eq!(up(StyleId::S5F, 67), None);
+        // L2/L1: mesma nota uma oitava abaixo
+        assert_eq!(bank.lookup(StyleId::S3A, true, 0, 60), StyleLookup::Interval(-8));
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub mod dsp;
 #[cfg(feature = "truce-plugin")]
 pub mod gui;
 pub mod harmony;
+pub mod programs;
 pub mod scales;
 
 pub use crate::core::{Buddies, DecaBuddyProcessor, Hv10Params, InputMeterLeds, OriginBuddies, OriginParams, PartParams};
@@ -13,7 +14,7 @@ pub use crate::core::{Buddies, DecaBuddyProcessor, Hv10Params, InputMeterLeds, O
 pub mod truce_integration {
     use super::*;
     use crate::dsp::RandDelay;
-    use crate::harmony::{FlexiVoicing, HarmonyMode, ModalVoicing, TemplateDegree, NUM_PARTS};
+    use crate::harmony::{ChordVoicing, FlexiVoicing, HarmonyMode, ModalVoicing, TemplateDegree, NUM_PARTS};
     use crate::scales::{StyleBank, StyleId, NUM_USER_STYLES};
     use std::sync::Arc;
     use truce::prelude::*;
@@ -27,6 +28,26 @@ pub mod truce_integration {
         #[name = "WAIT ALL"] V4,
         #[name = "PRIORITY"] V5,
         #[name = "SMART"] V6,
+        #[name = "CHORD"] V7,
+    }
+    #[derive(ParamEnum, Debug)]
+    pub enum ChordChoice {
+        #[name = "01 Normal"] V0,
+        #[name = "02 Diatonic"] V1,
+        #[name = "03 7th"] V2,
+        #[name = "04 Com-Dim"] V3,
+        #[name = "05 Diminish"] V4,
+        #[name = "06 Augment"] V5,
+        #[name = "07 IIm7/V"] V6,
+        #[name = "08 6/9"] V7,
+    }
+    #[derive(ParamEnum, Debug)]
+    pub enum ChordVcChoice {
+        #[name = "UN"] V0,
+        #[name = "L8"] V1,
+        #[name = "H8"] V2,
+        #[name = "HI"] V3,
+        #[name = "LO"] V4,
     }
     #[derive(ParamEnum, Debug)]
     pub enum KeyChoice {
@@ -138,10 +159,10 @@ pub mod truce_integration {
         #[param(name = "Tune", range = "linear(427, 453)", default = 440, unit = "Hz")] pub tune: IntParam,
         #[param(name = "MIDI Ch", range = "linear(1, 16)", default = 1)] pub midi_ch: IntParam,
         #[param(name = "Input", range = "linear(-15, 15)", default = 0.0, unit = "dB")] pub input: FloatParam,
-        #[param(name = "Master", range = "linear(0, 9)", default = 9)] pub master: IntParam,
+        #[param(name = "Master", range = "linear(0, 9)", default = 7)] pub master: IntParam,
         #[param(name = "Bypass", default = false)] pub bypass: BoolParam,
 
-        #[param(name = "Origin", default = 1)] pub org_buddies: EnumParam<OriginBuddiesChoice>,
+        #[param(name = "Origin", default = 2)] pub org_buddies: EnumParam<OriginBuddiesChoice>,
         #[param(name = "Origin Formant", range = "linear(-9, 9)", default = 0, format = "fmt_signed")] pub org_formant: IntParam,
         #[param(name = "Origin Level", range = "linear(0, 9)", default = 9)] pub org_level: IntParam,
         #[param(name = "Origin Pan", range = "linear(-9, 9)", default = 0, format = "fmt_pan")] pub org_pan: IntParam,
@@ -169,7 +190,7 @@ pub mod truce_integration {
         #[param(name = "L1 R.Delay", range = "linear(0, 18)", default = 0, format = "fmt_rdelay")] pub l1_rdelay: IntParam,
         #[param(name = "L1 Priority", range = "linear(1, 4)", default = 2)] pub l1_prio: IntParam,
 
-        #[param(name = "H1", default = 1)] pub h1_buddies: EnumParam<BuddiesChoice>,
+        #[param(name = "H1", default = 2)] pub h1_buddies: EnumParam<BuddiesChoice>,
         #[param(name = "H1 Style", default = 2)] pub h1_style: EnumParam<StyleChoice>,
         #[param(name = "H1 Sub Style", default = 6)] pub h1_sub_style: EnumParam<StyleChoice>,
         #[param(name = "H1 Modal", default = 11)] pub h1_modal: EnumParam<ModalChoice>,
@@ -180,7 +201,7 @@ pub mod truce_integration {
         #[param(name = "H1 R.Delay", range = "linear(0, 18)", default = 13, format = "fmt_rdelay")] pub h1_rdelay: IntParam,
         #[param(name = "H1 Priority", range = "linear(1, 4)", default = 3)] pub h1_prio: IntParam,
 
-        #[param(name = "H2", default = 1)] pub h2_buddies: EnumParam<BuddiesChoice>,
+        #[param(name = "H2", default = 2)] pub h2_buddies: EnumParam<BuddiesChoice>,
         #[param(name = "H2 Style", default = 2)] pub h2_style: EnumParam<StyleChoice>,
         #[param(name = "H2 Sub Style", default = 6)] pub h2_sub_style: EnumParam<StyleChoice>,
         #[param(name = "H2 Modal", default = 12)] pub h2_modal: EnumParam<ModalChoice>,
@@ -309,9 +330,18 @@ pub mod truce_integration {
         #[param(name = "U9 A#", range = "linear(-25, 24)", default = 0, format = "fmt_user")] pub u9_as: IntParam,
         #[param(name = "U9 B", range = "linear(-25, 24)", default = 0, format = "fmt_user")] pub u9_b: IntParam,
 
+        // Parametros adicionados na v0.3.2 (no fim para manter os IDs anteriores estaveis)
+        #[param(name = "Chord", default = 0)] pub chord: EnumParam<ChordChoice>,
+        #[param(name = "L2 Chord", default = 3)] pub l2_chord_vc: EnumParam<ChordVcChoice>,
+        #[param(name = "L1 Chord", default = 3)] pub l1_chord_vc: EnumParam<ChordVcChoice>,
+        #[param(name = "H1 Chord", default = 3)] pub h1_chord_vc: EnumParam<ChordVcChoice>,
+        #[param(name = "H2 Chord", default = 3)] pub h2_chord_vc: EnumParam<ChordVcChoice>,
+
         #[meter] pub meter_in: MeterSlot,
         #[meter] pub meter_out_l: MeterSlot,
         #[meter] pub meter_out_r: MeterSlot,
+        /// Ultimo Program Change recebido (ponte DSP -> interface, ver core::program_token).
+        #[meter] pub meter_program: MeterSlot,
     }
 
     impl ChorusVoxParams {
@@ -362,6 +392,9 @@ pub mod truce_integration {
             ]
         }
 
+        #[cfg(test)]
+        pub(crate) fn to_hv10_for_tests(&self) -> Hv10Params { self.to_hv10() }
+
         /// Estado do HV10 lido dos parametros do host.
         fn to_hv10(&self) -> Hv10Params {
             let mut p = Hv10Params::default();
@@ -372,8 +405,16 @@ pub mod truce_integration {
                 3 => HarmonyMode::MonoChn,
                 4 => HarmonyMode::WaitAll,
                 5 => HarmonyMode::Priority,
-                _ => HarmonyMode::Smart,
+                6 => HarmonyMode::Smart,
+                _ => HarmonyMode::Chord,
             };
+            p.harmony.chord = self.chord.index() as u8;
+            p.harmony.chord_voicing = [
+                ChordVoicing::from_index(self.l2_chord_vc.index() as usize),
+                ChordVoicing::from_index(self.l1_chord_vc.index() as usize),
+                ChordVoicing::from_index(self.h1_chord_vc.index() as usize),
+                ChordVoicing::from_index(self.h2_chord_vc.index() as usize),
+            ];
             p.harmony.key = self.key.index() as u8;
             p.sub_active = self.sub.value();
             p.sub_key = self.sub_key.index() as u8;
@@ -458,6 +499,108 @@ pub mod truce_integration {
         }
     }
 
+    /// Valores de parametro (nome do campo, id, valor "plain") que reproduzem um estado do HV10.
+    /// Usado pelos presets de fabrica e pela troca de programa na interface. Parametros GLOBAIS
+    /// (Tune, MIDI Ch, Input, Bypass) e os User Styles nao fazem parte de um programa.
+    pub fn program_values(params: &ChorusVoxParams, p: &Hv10Params) -> Vec<(&'static str, u32, f64)> {
+        use crate::core::{Buddies, OriginBuddies};
+        let mode = match p.harmony.mode {
+            HarmonyMode::Style => 0,
+            HarmonyMode::Modal => 1,
+            HarmonyMode::FlexiChord => 2,
+            HarmonyMode::MonoChn => 3,
+            HarmonyMode::WaitAll => 4,
+            HarmonyMode::Priority => 5,
+            HarmonyMode::Smart => 6,
+            HarmonyMode::Chord => 7,
+        };
+        let rd = |r: RandDelay| match r {
+            RandDelay::Off => 0.0,
+            RandDelay::Fixed(n) => n as f64,
+            RandDelay::Random(n) => 9.0 + n as f64,
+        };
+        let bud = |b: Buddies| match b {
+            Buddies::Off => 0.0,
+            Buddies::On => 1.0,
+            Buddies::OnUnison => 2.0,
+        };
+        let modal = |m: ModalVoicing| match m {
+            ModalVoicing::Un => 0.0,
+            ModalVoicing::OctLow => 1.0,
+            ModalVoicing::OctHigh => 2.0,
+            ModalVoicing::Low(n) => 11.0 - n as f64,
+            ModalVoicing::High(n) => 10.0 + n as f64,
+        };
+        let cvc = |c: ChordVoicing| match c {
+            ChordVoicing::Un => 0.0,
+            ChordVoicing::OctLow => 1.0,
+            ChordVoicing::OctHigh => 2.0,
+            ChordVoicing::Hi => 3.0,
+            ChordVoicing::Lo => 4.0,
+        };
+        let deg = |d: TemplateDegree| -> f64 { match d {
+            TemplateDegree::Off => 0.0,
+            TemplateDegree::On => 1.0,
+            TemplateDegree::Minor => 2.0,
+            TemplateDegree::Major => 3.0,
+        } };
+        let h = &p.harmony;
+        let mut v: Vec<(&'static str, u32, f64)> = Vec::with_capacity(64);
+        macro_rules! put {
+            ($field:ident, $val:expr) => {
+                v.push((stringify!($field), params.$field.id(), $val as f64));
+            };
+        }
+        put!(mode, mode);
+        put!(key, h.key);
+        put!(sub, if p.sub_active { 1.0 } else { 0.0 });
+        put!(sub_key, p.sub_key);
+        put!(master, p.master_level);
+        put!(org_buddies, match p.origin.buddies {
+            OriginBuddies::Off => 0.0,
+            OriginBuddies::On => 1.0,
+            OriginBuddies::OnUnison => 2.0,
+            OriginBuddies::Fx => 3.0,
+        });
+        put!(org_formant, p.origin.formant);
+        put!(org_level, p.origin.level);
+        put!(org_pan, p.origin.pan);
+        put!(org_rdelay, rd(p.origin.rand_delay));
+        macro_rules! part {
+            ($i:expr, $b:ident, $st:ident, $sub:ident, $md:ident, $fo:ident, $lv:ident, $pn:ident, $pc:ident, $rdl:ident, $pr:ident, $cv:ident) => {
+                put!($b, bud(p.parts[$i].buddies));
+                put!($st, h.styles[$i] as u8);
+                put!($sub, p.sub_styles[$i] as u8);
+                put!($md, modal(h.modal_voicing[$i]));
+                put!($fo, p.parts[$i].formant);
+                put!($lv, p.parts[$i].level);
+                put!($pn, p.parts[$i].pan);
+                put!($pc, p.parts[$i].p_correct);
+                put!($rdl, rd(p.parts[$i].rand_delay));
+                put!($pr, h.priority_rank[$i]);
+                put!($cv, cvc(h.chord_voicing[$i]));
+            };
+        }
+        part!(0, l2_buddies, l2_style, l2_sub_style, l2_modal, l2_formant, l2_level, l2_pan, l2_pcorr, l2_rdelay, l2_prio, l2_chord_vc);
+        part!(1, l1_buddies, l1_style, l1_sub_style, l1_modal, l1_formant, l1_level, l1_pan, l1_pcorr, l1_rdelay, l1_prio, l1_chord_vc);
+        part!(2, h1_buddies, h1_style, h1_sub_style, h1_modal, h1_formant, h1_level, h1_pan, h1_pcorr, h1_rdelay, h1_prio, h1_chord_vc);
+        part!(3, h2_buddies, h2_style, h2_sub_style, h2_modal, h2_formant, h2_level, h2_pan, h2_pcorr, h2_rdelay, h2_prio, h2_chord_vc);
+        put!(tpl1, deg(h.template[0]).min(1.0));
+        put!(tpl2, deg(h.template[1]).min(1.0));
+        put!(tpl3, deg(h.template[2]));
+        put!(tpl4, deg(h.template[3]).min(1.0));
+        put!(tpl5, deg(h.template[4]).min(1.0));
+        put!(tpl6, deg(h.template[5]).min(1.0));
+        put!(tpl7, deg(h.template[6]));
+        put!(flexi, match h.flexi_voicing {
+            FlexiVoicing::LllH => 0.0,
+            FlexiVoicing::LlHh => 1.0,
+            FlexiVoicing::LHhh => 2.0,
+        });
+        put!(chord, h.chord);
+        v
+    }
+
     /// Copia para o nucleo apenas o que mudou no host desde o ultimo bloco, preservando
     /// alteracoes recebidas por MIDI CC (CC7/10/11/12/13/80/81/82) ate o controle ser mexido.
     fn sync_changed(core: &mut Hv10Params, new: &Hv10Params, old: &Hv10Params) {
@@ -470,6 +613,7 @@ pub mod truce_integration {
         sync!(harmony.key);
         sync!(harmony.template);
         sync!(harmony.flexi_voicing);
+        sync!(harmony.chord);
         sync!(sub_active);
         sync!(sub_key);
         sync!(tune_hz);
@@ -486,6 +630,7 @@ pub mod truce_integration {
             sync!(harmony.styles[p]);
             sync!(harmony.modal_voicing[p]);
             sync!(harmony.priority_rank[p]);
+            sync!(harmony.chord_voicing[p]);
             sync!(sub_styles[p]);
             sync!(parts[p].buddies);
             sync!(parts[p].formant);
@@ -597,6 +742,9 @@ pub mod truce_integration {
                     EventBody::ControlChange { channel, cc, value, .. } => {
                         state.core.handle_midi_event(0xB0 | (*channel & 0x0F), *cc, *value);
                     }
+                    EventBody::ProgramChange { channel, program, .. } => {
+                        state.core.handle_midi_event(0xC0 | (*channel & 0x0F), *program, 0);
+                    }
                     _ => {}
                 }
             }
@@ -618,6 +766,7 @@ pub mod truce_integration {
             }
 
             let peak = |s: &[f32]| s.iter().fold(0.0_f32, |a, &x| a.max(x.abs()));
+            ctx.set_meter(P::MeterProgram, state.core.program_token);
             ctx.set_meter(P::MeterIn, peak(&state.mono_scratch[..n]));
             ctx.set_meter(P::MeterOutL, peak(&state.out_l_scratch[..n]));
             if buffer.num_output_channels() >= 2 {
@@ -638,4 +787,29 @@ pub mod truce_integration {
     use ChorusVoxParamsParamId as P;
 
     truce::plugin! { logic: ChorusVox, params: ChorusVoxParams }
+}
+
+#[cfg(all(test, feature = "truce-plugin"))]
+mod program_roundtrip_tests {
+    use super::truce_integration::{program_values, ChorusVoxParams};
+    use crate::programs::factory_programs;
+    use truce::params::Params;
+
+    /// Programa -> valores de parametro -> parametros do host -> estado do HV10 sem perdas.
+    #[test]
+    fn every_factory_program_survives_the_parameter_roundtrip() {
+        for prog in factory_programs() {
+            let params = ChorusVoxParams::default();
+            for (_, id, value) in program_values(&params, &prog.params) {
+                params.set_plain(id, value);
+            }
+            let back = params.to_hv10_for_tests();
+            let mut expect = prog.params.clone();
+            // Globais nao fazem parte do programa
+            (expect.tune_hz, expect.midi_base_channel, expect.input_gain_db, expect.bypass) =
+                (back.tune_hz, back.midi_base_channel, back.input_gain_db, back.bypass);
+            expect.harmony.part_on = back.harmony.part_on;
+            assert_eq!(back, expect, "programa {}", prog.display_name());
+        }
+    }
 }
