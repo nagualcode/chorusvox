@@ -2,14 +2,9 @@
 
 [![macOS Supported](https://img.shields.io/badge/platform-macOS%20(AU%20%2F%20VST3)-blue.svg)](#-macos-installation--release-assets)
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Performance](https://img.shields.io/badge/performance-73x%20Real--Time%20(SIMD)-brightgreen.svg)](#-high-performance-vectorization-benchmarks)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg)](LICENSE)
 
-**ChorusVox DecaBuddy** is a real-time vocal harmony generator and discrete component-modeled virtual analog processor written in Rust. It re-engineers, optimizes, and expands the classic **Akai Professional DecaBuddy HV10** hardware rack unit (1999) and its vintage companion (`DecaBuddy.dll` v1.02).
-
-By combining all **37 original chromatic scale lookup tables and floating-point constants** extracted from the original Akai binary with discrete analog and fixed-point DSP modeling derived from the **Akai HV10 Service Manual (`PC MAIN BLK L8020A501A`)**, ChorusVox delivers thick, organic vocal harmonies alongside a **Zero-Latency Live Monitoring Engine**, an intelligent **Jazz Harmony Engine (`FlexiChd`)**, and a studio-grade **Natural Mode**.
-
----
+**ChorusVox DecaBuddy** is a Rust emulation of the **Akai DecaBuddy HV10** vocal harmony processor (1 original voice + 4 harmonies + 5 unison voices = 10 voices). It reproduces the unit's controls, harmony modes and processing chain, and adds one modern extra: the **SMART** MIDI mode.
 
 <p align="center">
   <img src="preview.jpg" alt="ChorusVox DecaBuddy Interface" width="100%">
@@ -17,236 +12,179 @@ By combining all **37 original chromatic scale lookup tables and floating-point 
 
 ---
 
-## ⚡ What's New in v0.2.14
+## ⚡ What's New in v0.3.0: HV10 emulation
 
-* **Akai & IVL Patent-Derived Continuous NCO Phase Accumulator:** Replaced decremented phase counters with a continuous angular phase accumulator ($\Delta\phi = 1/T_s$) directly derived from **Akai Patent JPH0331279B2 / JPS60159799A** (*"Signal Pitch Converter"*, Koichi Yoshino) and **IVL Technologies US Patent 5,567,901**. Guarantees strict $C^0$ phase continuity during pitch glides and note transitions without phase slips or grain collisions.
-* **Strict Normalized Overlap-Add (NOLA) Precision:** Removed artificial denominator clamping at `0.35` in PSOLA reconstruction, eliminating the transient amplitude notches and clicks previously marking grain boundaries during pitch changes.
-* **Continuous Pitch Quantization (Zero-Step Glissando):** Formulated mathematically continuous MIDI and scale pitch calculations, completely eliminating the $(1 - q_{\text{norm}})$ semitone discrete step jump when pitch tracks across integer chromatic boundaries.
-* **Seamless Legato Note Transitions:** Verified with unit and derivative tests (`test_legato_note_transition_has_no_transient_clicks`), producing silky-smooth musical note transitions without pops, clicks, or artifacts.
-* **Glottal Epoch Tracking & Pure Hermite Resampling:** Preserves full low-pass peak epoch tracking centered on true glottal closure instants ($T_0$) with pure Catmull-Rom cubic Hermite interpolation for 100% clean sound on both bass fundamentals and high-register vocals.
-* **Hardware SIMD Vector Acceleration:** Explicit ARM64 NEON (`vfmaq_f32`) on Apple Silicon and AVX2 on x86_64, running at **73x faster than real-time**.
+v0.3.0 is a rewrite. Controls and DSP now follow the HV10 documentation and the DSP engine of Akai's own DecaBuddy v1.02 software.
+
+* **HV10 front panel:**
+  * parts **ORIGIN, L2, L1, H1, H2**;
+  * **BUDDIES** (`--` / `ON` / `ON+UN` / `FX`);
+  * **FORMANT −9…+9**, **LEVEL 0…9**, **PAN L9…R9**;
+  * **P.CORRECT `--`, 1…9** and **RAND.DELAY `--`, D1…D9, R1…R9**;
+  * **MASTER**, **TUNE 427–453 Hz**, **Sub** Key/Style.
+* **HV10 harmony modes:** STYLE (`UN`, `8v`, `3A`–`3H`, `5A`–`5H`, `U1`–`U9`), MODAL (template + voicing `L8`…`H8`), FLEXICHORD, MONO CHN., WAIT ALL and PRIORITY, plus the modern **SMART** mode.
+* **Pitch-shifting engine** from the Akai DSP code:
+  * two-head shifter locked to the pitch period, with triangular windows (2·Ts up, 2·P down);
+  * linear interpolation and plain overlap-add;
+  * formant ±25%;
+  * random delay from three Q15 LFOs;
+  * unvoiced sounds pass through every harmony in unison.
+* **Real hardware chain only:** 16-bit ADC/DAC quantization, clipping in the 16-bit DSP mix, coupling capacitors, and the PCM3003E bandwidth.
+* **New interface:** a compact, flat, Ableton Live-inspired editor (868×346):
+  * each voice is a color-coded strip: ORIGIN gray, L2 blue, L1 yellow, H1 green, H2 orange (the harmony colors of Akai's DecaBuddy software);
+  * only the selectors for the active mode are shown (Style/Sub Style, Modal voicing, Priority);
+  * a **USER STYLES** tab edits U1–U9 note by note.
+* **Removed** (they are not on the HV10): the `Drive` / "analog bus", `Natural`, `Link` and `Dual` controls, plus the invented relay, crosstalk, dielectric-absorption and "console shelf" models.
+* **Latency:** the original voice is undelayed. Harmonies lag by 0.5–1.5 pitch periods plus RAND.DELAY, like the hardware. The plugin reports 0 latency, and offline bounces sound the same as realtime playback.
+* **Performance:** about 240× faster than realtime on Apple Silicon (CLI benchmark: ORIGIN + H1/H2 + L2 octave with unison).
+
+> [!WARNING]
+> v0.3.0 changes the parameter set. Sessions saved with v0.2.x will not recall their settings.
 
 ---
 
 ## 🍎 macOS Installation & Release Assets
 
-Pre-compiled binary releases are packaged exclusively for **macOS** (Universal Apple Silicon & Intel, supporting Ableton Live, Logic Pro, Reaper, Bitwig, Studio One, Cubase, FL Studio, etc.).
+Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ableton Live, Logic Pro, Reaper, Bitwig, Studio One, Cubase, FL Studio, etc.).
 
-1. Navigate to the **[Releases](../../releases)** page of this repository.
-2. Under the latest version (**v0.2.14**), expand the **Assets** section and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`** *(do not download the source code zip)*.
-3. Extract the archive and copy the bundles to your macOS plug-in directories:
-   * **Audio Unit (AUv2):** Copy `ChorusVox DecaBuddy.component` to:
-     ```bash
-     ~/Library/Audio/Plug-Ins/Components/
-     ```
-   * **VST3:** Copy `ChorusVox DecaBuddy.vst3` to:
-     ```bash
-     ~/Library/Audio/Plug-Ins/VST3/
-     ```
-4. If required by macOS Gatekeeper security policies, clear the quarantine attributes in Terminal:
+1. Open the **[Releases](../../releases)** page of this repository.
+2. Under the latest version, expand **Assets** and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`**.
+3. Extract the archive and copy the bundles:
+   * **Audio Unit (AUv2):** `ChorusVox DecaBuddy.component` → `~/Library/Audio/Plug-Ins/Components/`
+   * **VST3:** `ChorusVox DecaBuddy.vst3` → `~/Library/Audio/Plug-Ins/VST3/`
+4. If macOS Gatekeeper blocks the plug-in:
    ```bash
    xattr -cr ~/Library/Audio/Plug-Ins/VST3/ChorusVox\ DecaBuddy.vst3 ~/Library/Audio/Plug-Ins/Components/ChorusVox\ DecaBuddy.component
    ```
-5. Restart your DAW to perform a complete plug-in rescan.
+5. Restart your DAW to rescan.
 
 ---
 
 ## 🛠️ Building & Installing from Source (TRUCE Framework)
 
-If you prefer compiling directly from source on your machine, ChorusVox DecaBuddy utilizes the **[TRUCE](https://github.com/purefunctor/truce)** audio plugin framework and CLI.
-
-### 1. Prerequisites
-* **Rust Toolchain:** Install stable Rust via `rustup`:
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-* **TRUCE CLI (`cargo-truce`):** Install the command-line utility:
-  ```bash
-  cargo install truce-cli
-  ```
-
-### 2. Build & Installation Commands
-
-* **Compile, sign, and install AUv2 and VST3 bundles to your user plug-in directory:**
-  ```bash
-  cargo truce install --vst3 --au2
-  ```
-  *This automatically compiles with `--release` optimization, creates macOS `.vst3` and `.component` bundles, applies ad-hoc codesigning, and copies them to `~/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/Components`.*
-
-* **Build bundles without installing to system folders:**
-  ```bash
-  cargo truce build --vst3 --au2
-  ```
-  *(Output bundles will be placed inside `target/bundles/`).*
-
-* **Validate installed plug-ins with Apple's official `auval` tool:**
-  ```bash
-  cargo truce validate --auval
-  ```
-
-* **Flush Audio Units cache if your DAW fails to detect the update:**
-  ```bash
-  cargo truce reset-au --yes
-  ```
-
-* **Uninstall bundles from the system:**
-  ```bash
-  cargo truce uninstall --vst3 --au2
-  ```
+1. Install Rust (`rustup`) and the TRUCE CLI: `cargo install truce-cli`.
+2. Then:
+   ```bash
+   cargo truce install --vst3 --au2     # build, sign and install AUv2 + VST3
+   cargo truce build --vst3 --au2       # bundles only, in target/bundles/
+   cargo truce validate --auval         # validate the installed AU
+   cargo truce reset-au --yes           # flush the AU cache
+   cargo truce uninstall --vst3 --au2
+   cargo test --release                 # DSP / harmony test suite
+   cargo run --release --bin decabuddy_cli [in.wav] [out.wav]   # offline render + benchmark
+   ```
 
 ---
 
-## 📖 Operational Manual & Parameter Reference
+## 🎨 Interface
 
-The user interface is organized into 6 functional strips: **Global & Input**, **Direct & Unison**, and four independent harmony channels (**VOX 1** through **VOX 4**).
+* **Top bar:** title, **VOICES / USER STYLES** tabs, **BYPASS**, and the input/output meters.
+* **Global row:** Mode, Key, Sub and Sub Key, then the Input, Master, Tune and MIDI Ch knobs. The right side shows controls for the active mode: the MODAL template (1–7, with `m`/`M` on 3 and 7), the FLEXICHORD voicing, or a short hint.
+* **Voice strips:** ORIGIN, L2, L1, H1 and H2, each with its own color. A strip has BUDDIES buttons, the selector for the current mode, and knobs for Level, Pan, Formant, P.Correct and R.Delay. Strips that are switched off are dimmed.
+* **Knobs:** drag vertically; hold **Shift** for fine steps; **double-click** resets to the default.
+* **USER STYLES tab:**
+  * pick U1–U9;
+  * drag each note's bar to set its harmony interval (−24…+24 semitones; the resulting note is shown in the current Key);
+  * double-click a bar to leave that note unassigned (`--`).
 
-### 1. `GLOBAL & INPUT` Strip
+---
 
-Controls root key, incoming MIDI chord parsing, master concert pitch, discrete analog drive, Natural mode, and peak metering.
+## 📖 Operation (follows the HV10 Operator's Manual)
 
-| Control | Range / Options | Description |
+### GLOBAL
+
+| Control | Range | Description |
 | :--- | :--- | :--- |
-| **Key** | `C`, `C#`, `D`, `D#`, `E`, `F`, `F#`, `G`, `G#`, `A`, `A#`, `B` | Sets musical root key for all harmony voices assigned to automatic scale tables (Modal 1–5, Harmonic Minor, Melodic Minor, etc.). |
-| **MIDI Mode** | `Auto Ch`, `Mono (1-4)`, `Wait All`, `Priority`, `FlexiChd` | Voice-allocation strategy for harmony voices whose **Scale** is set to **`MIDI`**. |
-| **MIDI Ch** | `1` to `16` | Sets base MIDI reception channel. In `Mono (1-4)` mode, voices 1 to 4 listen consecutively on `MIDI Ch` through `MIDI Ch + 3`. |
-| **Tune Hz** | `427 Hz` to `453 Hz` *(Default: `440 Hz`)* | Master concert A4 reference frequency for the YIN pitch tracker. |
-| **In Gain** | `-15.0 dB` to `+15.0 dB` *(Default: `0.0 dB`)* | Input drive into the discrete front-end stage. Levels above `0 dB` introduce subtle 2nd-harmonic analog warmth. |
-| **Drive** | `0.0%` to `100.0%` *(Default: `35.0%`)* | Master analog drive for the **ChoirAnalogBus**: Ariwa 185 Hz console low-mid warmth shelf, JRC NJM4558L asymmetric rail saturation (Silk 2nd harmonic), 1.0 V/µs soft slew-rate limiting, 9V DC dynamic power supply sag, Nichicon/Elna electrolytic dielectric absorption, and stereo crosstalk (-62 dB). Applied strictly to synthesized choir voices. |
-| **Natural** | `On` / `Off` *(Default: `Off`)* | **Mode Selector (Classic HV10 vs. Modern Studio):**<br>• `Off` (*Classic HV10*): 1990s PSOLA time-domain grain bite, fast stepped microcontroller note tracking, and crunchy consonant presence.<br>• `On` (*Natural*): Intelligent sibilance ducking (clean unvoiced consonants) and 2nd-order critically damped S-curve portamento (~28 ms). |
-| **In** *(Meter)* | Vertical Bar | Ballistic input peak meter modeled after the `NJU7032D` (IC401) circuit and the 3 hardware LEDs (`-12 dB`, `-6 dB`, `0 dB/Over`). |
+| **Mode** | STYLE, MODAL, FLEXICHORD, MONO CHN., WAIT ALL, PRIORITY, SMART | How harmonies are generated (see below). |
+| **Key** | C/Am … B/G#m | Key used by STYLE and MODAL. |
+| **Sub** / **Sub Key** | On/Off, key | HV10 Sub Parameter. While Sub is on, Sub Key and each part's Sub Style replace Key and Style. MIDI CC80/81 toggle it like the PROGRAM footswitches. |
+| **Tune** | 427–453 Hz | TUNE ADJUST: reference pitch for detection and P.CORRECT. |
+| **MIDI Ch** | 1–16 | Base channel. ORIGINAL = base, L2 = base+1, L1 = base+2, H1 = base+3, H2 = base+4. |
+| **Input** | −15…+15 dB | INPUT LEVEL. The ADC clips at 0 dBFS, as on the hardware. |
+| **Master** | 0–9 | MASTER LVL. |
+| **Bypass** | On/Off | HV10 Normal Bypass: the dry signal on both outputs, through the codec. |
 
-> [!NOTE]
-> **Automatic Live vs. Offline PDC Latency:** During real-time monitoring, ChorusVox runs in **Live Mode** with **0 ms reported latency** to the DAW and **0 ms delay on the Direct path**. During offline DAW export/bounce, full lookahead with 2496 samples of Plugin Delay Compensation (PDC) is engaged automatically.
+### Voice parameters (ORIGIN, L2, L1, H1, H2)
 
-#### Detailed MIDI Modes (`MIDI Mode`)
-
-Set any voice's **Scale** knob to **`MIDI`** (fully counter-clockwise) to control it via incoming MIDI notes. All modes support **Sustain Pedal (`MIDI CC 64`)**:
-
-* **`Auto Ch` (Vanilla / Hardware Default):** Authentic Akai hardware behavior. Chord notes on `MIDI Ch` are sorted lowest-to-highest and assigned across active MIDI voices.
-* **`Mono (1-4)`:** Voices 1 to 4 listen independently to consecutive MIDI channels (`MIDI Ch` to `MIDI Ch + 3`), allowing independent polyphonic counterpoint lines.
-* **`Wait All`:** Harmony voices remain muted until the number of held MIDI keys equals or exceeds the number of active MIDI voices.
-* **`Priority`:** Notes are assigned to voices in the exact chronological sequence keys are struck.
-* **`FlexiChd` (Intelligent Jazz Harmony Engine):** Play any jazz chord (`Dmaj7`, `F#m6`, `9th`, `13th`, or 2-note shell voicings) and **all 4 voices track dynamically with your sung melody** while locking onto chord tones:
-  * **Dynamic Chord-Scale Inference:** Combines held MIDI chord notes with global **Key** to infer harmonic context from 2-note shell voicings and passing tones.
-  * **Voice Leading Memory & Smooth Legato:** Retains common tones stationary across chord changes, gliding smoothly into new voicings with natural vocal portamento.
-  * **Anti-Clash ($b2/b9$ Prevention):** Automatically nudges harmony voices that land 1 semitone away from the lead vocal.
-  * **Intelligent Sustain Pedal Focus:** Automatically prioritizes recently struck chord tones during extended CC64 pedal passages.
-
----
-
-### 2. `DIRECT & UNISON` Strip
-
-Controls the dry lead vocal path, the 10th unison doubling voice, parameter linking, and stereo output metering.
-
-| Control | Range / Options | Description |
+| Control | Range | Description |
 | :--- | :--- | :--- |
-| **Direct** | `On` / `Off` | Enables or mutes dry lead vocal. Turn `Off` when running on an auxiliary send/return track. |
-| **Dir Lev** | `-24.0 dB` to `0.0 dB` | Output level of direct signal (`-24.0 dB` = mute). |
-| **Dir Pan** | `-50` (L) to `+50` (R) | Constant-power stereo pan position for direct vocal. |
-| **Link** | `On` / `Off` | Mirrors `VOX 1` **Random**, **Formant**, and **Quantise** settings across `VOX 2`, `VOX 3`, and `VOX 4` while preserving each voice's individual **Scale**, **Level**, and **Pan**. |
-| **Unison** | `On` / `Off` | Enables dedicated 10th unison doubling voice with warm analog low-pass filtering. |
-| **U.Rand** | `0.0` to `100.0` *(Default: `0.0`)* | Controls Ornstein-Uhlenbeck pitch drift ($\pm 9\text{ cents}$) and delay modulation for natural doubling. Opens at `0.0` for 100% deterministic pitch and phase; humanization engages above `0.0`. |
-| **U.Form** | `-50.0` to `+50.0` | Shifts vocal tract formant frequencies of the Unison voice without altering pitch. |
-| **U.Quant** | `0.0` to `100.0` | Pitch quantization strength for Unison voice. |
-| **U.Level** | `-24.0 dB` to `0.0 dB` | Output level of Unison voice. |
-| **U.Pan** | `-50` (L) to `+50` (R) | Stereo pan position for Unison voice. |
-| **Out** *(Meter)* | Stereo Bar (L/R) | Peak output meter after stereo reconstruction and NJM4558L crosstalk modeling. |
+| **Buddies** | `--`, `ON`, `ON+UN`; ORIGIN adds `FX` | Part off/on; `ON+UN` adds that part's unison voice; `FX` = the original's unison only. |
+| **Style** | `UN`, `8v`, `3A`–`3H`, `5A`–`5H`, `U1`–`U9` | STYLE mode table. In STYLE mode L2/L1 always harmonize below and H1/H2 above. |
+| **Sub Style** | same | Style used while Sub is on. |
+| **Modal** | `UN`, `8L`, `8H`, `L8`…`L1`, `H1`…`H8` | MODAL voicing: the n-th template chord tone below (L) or above (H) the sung note. |
+| **Formant** | −9…+9 | Formant shift without pitch change (±25%). |
+| **Level** | 0–9 | 0 = off; 3 dB steps, 9 = 0 dB. |
+| **Pan** | L9 … C … R9 | Pan law of the DSP (−3 dB center). |
+| **P.Correct** | `--`, 1–9 | Pitch correction of the harmony toward the tempered grid. `--` follows the singer's inflection; 9 locks to the grid. |
+| **R.Delay** | `--`, D1–D9, R1–R9 | D: fixed delay. R: random delay, three slow LFOs, plus ±1.1 cents of detune per step between a part and its unison. |
+| **Priority** | 1–4 | PRIORITY mode: which received note (1st…4th) this part plays. |
+
+### Harmony modes
+
+* **STYLE:** Key + Style per part. Notes left unassigned in a table follow the DSP rule: a gap of 2+ notes is filled half from each neighbor; a single-note gap uses the neighbor in the direction of the pitch deviation.
+* **MODAL:** Key + **Template** (degrees 1–7; 3 and 7 accept `m`/`M`) + Modal voicing per part. The chord root comes from a MIDI note on the base channel and is latched.
+* **FLEXICHORD:** play a 3+ note chord in any inversion. Harmonies take the nearest chord tones below/above the sung note, with voicing `LO LO LO HI`, `LO LO HI HI` or `LO HI HI HI`. Notes that don't form a known chord are ignored. The chord is latched.
+* **MONO CHN.:** each part plays the note received on its own channel (base+1 … base+4).
+* **WAIT ALL:** harmonies sound once as many notes are held as there are parts switched on. Notes are assigned by pitch order.
+* **PRIORITY:** notes are assigned in the order they are played, following each part's Priority.
+* **SMART** (modern, not on the HV10):
+  * infers the chord from held notes plus Key (handles 2-note shells and extensions);
+  * keeps common tones between chords;
+  * avoids b9 clashes against the melody;
+  * honors the sustain pedal (CC64).
+
+In the MIDI note modes (MONO CHN., WAIT ALL, PRIORITY) the harmony is tuned exactly to the received note, as on the DSP, and folded into ±1 octave of the singer.
+
+### MIDI implementation
+
+| Message | Function |
+| :--- | :--- |
+| Note On/Off | MODAL root, FLEXICHORD/SMART chords, MONO CHN./WAIT ALL/PRIORITY notes |
+| CC7 / CC10 / CC12 / CC13 | LEVEL / PAN / FORMANT / P.CORRECT of the part on that channel (base = ORIGIN, base+1…4 = L2…H2) |
+| CC11 | MASTER LVL |
+| CC80 / CC81 | Sub Parameter (PROGRAM A/B footswitch) |
+| CC82 | BYPASS |
+| CC64 | Sustain (SMART and chord modes) |
+| CC120 / CC123 | All notes off |
+
+CC changes stay in effect until the matching on-screen control is moved.
 
 ---
 
-### 3. Harmony Strips: `VOX 1`, `VOX 2`, `VOX 3`, `VOX 4`
-
-Four independent PSOLA harmony channels. Enabling **Dual** across all 4 voices alongside **Direct** and **Unison** produces all **10 voices** of the DecaBuddy architecture.
-
-| Control | Range / Options | Description |
-| :--- | :--- | :--- |
-| **On** | `On` / `Off` | Enables or disables voice channel with a 40 ms anti-click envelope (zero CPU when idle). |
-| **Dual** | `On` / `Off` | Activates twin sub-voice panned to opposite stereo side (`-Pan`) with shifted formants, $-9\text{ cents}$ detune, $+14\text{ ms}$ Haas delay, and authentic warm 11.5 kHz analog reconstruction filtering. |
-| **Scale** | `37 Options` | Selects `MIDI`, custom `User` scale, or 35 Akai preset harmony tables (`Low Octave`, `Low 3rd`, `Low 5th`, `Low 7th`, `Unison`, `High 3rd`, `High 5th`, `High 7th`, `High Octave`). |
-| **Random** | `0.0` to `100.0` *(Default: `0.0`)* | Humanizes pitch drift ($\pm 9\text{ cents}$) and timing micro-jitter per sub-voice. Opens at `0.0` for deterministic phase; drift and dynamic 9V sag micro-cents act above `0.0`. |
-| **Formant** | `-50.0` to `+50.0` | Shifts vocal tract formants with strict timbre preservation (`src_step = formant_ratio`) and pure Catmull-Rom cubic Hermite interpolation. |
-| **Quantise** | `0.0` to `100.0` | Blends between natural vocal inflection tracking (`0%`) and chromatic grid locking (`100%`) with continuous pitch quantization and zero step discontinuities. |
-| **Level** | `-24.0 dB` to `0.0 dB` | Channel output level. |
-| **Pan** | `-50` (L) to `+50` (R) | Stereo pan position for the main voice (and mirror `-Pan` for the Dual voice). |
-
----
-
-## 🔬 Hardware Simulation Architecture (Akai HV10 & Ariwa Studio)
+## 🔬 What is emulated, and where it comes from
 
 ```text
-               ┌─────────────────────────────────────────────────────────────┐
-                │           INPUT SIGNAL (Mono L or Summed L + R)             │
-                └──────────────────────────────┬──────────────────────────────┘
-                                               │
-                       ┌───────────────────────┴───────────────────────┐
-                       │                                               │
-            [ DIRECT LINEAR PATH ]                          [ DIGITAL DSP PATH ]
-            • Takamisawa RY-9WK Relays                      (Burr-Brown PCM3003E ADC)
-              (2.2ms Contact Chatter Bounce)                           │
-            • 100% Linear & Transparent (0% THD)                       │
-            • 20 Hz - 20 kHz Flat Response                             ▼
-            • Live: 0 ms delay / Studio: 2496 PDC      ┌───────────────────────────────────────────────┐
-                       │                               │ 1. TIME-SLICED YIN & EPOCH TRACKING ENGINE    │
-                       │                               │ • 1536-Sample Synchronous Window (down to 42Hz│
-                       │                               │ • Adaptive ~22.05 kHz Decimation (2x/4x/8x SR)│
-                       │                               │ • Robust Peak Epoch Extraction with T0 Prior  │
-                       │                               │ • Dual-Polarity Glottal Pulse Tracking        │
-                       │                               │ • Zero-Crossing Rate & High-Freq Sibilance Det│
-                       │                               └───────────────────────┬───────────────────────┘
-                       │                                                       │
-                       │                                                       ▼
-                       │                               ┌───────────────────────────────────────────────┐
-                       │                               │ 2. 10x TD-PSOLA ENGINE (ADSP-2186M HERITAGE)  │
-                       │                               │ • Akai & IVL Continuous NCO Phase Accumulator │
-                       │                               │ • Pure 4-Point Hermite Cubic Interpolation (C1│
-                       │                               │ • Continuous MIDI & Scale Pitch Quantization  │
-                       │                               │ • Strict Normalized Overlap-Add (NOLA) Sum    │
-                       │                               │ • Mode: Classic HV10 vs. Natural S-Curve Slew │
-                       │                               │ • Post-NOLA 16-bit Q15 Quantizer + 40-bit MAC │
-                       │                               │ • Akai 32.78 Hz Subsonic HPF & Voice DAC LPF  │
-                       │                               └───────────────────────┬───────────────────────┘
-                      │                                                       │
-                      │                                                       ▼
-                      │                               ┌───────────────────────────────────────────────┐
-                      │                               │ 3. CHOIR ANALOG BUS (ARIWA STUDIO & HV10)     │
-                      │                               │ • Natural Mode: Smart Sibilance Ducking       │
-                      │                               │ • Ariwa Console 185 Hz Low-Mid Warmth Shelf   │
-                      │                               │ • 9V DC Dynamic Power Supply Sag (C22 220µF)  │
-                      │                               │ • JRC NJM4558L Asymmetric Silk Saturation     │
-                      │                               │ • NJM4558L 1.0 V/µs Soft Slew-Rate Limiting   │
-                      │                               │ • Active Sallen-Key LP Filter (16.8 kHz)      │
-                      │                               │ • SIP-8 Dual-Opamp Stereo Crosstalk (-62 dB)  │
-                      │                               │ • C23/C25 Output Electrolytic Caps with       │
-                      │                               │   Dielectric Absorption (DA) Soakage Memory   │
-                      │                               └───────────────────────┬───────────────────────┘
-                      │                                                       │
-                      └───────────────────────┬───────────────────────────────┘
-                                              ▼
-               ┌─────────────────────────────────────────────────────────────┐
-               │ 4. MASTER SUM & ANALOG BUS SOFT LIMITER                     │
-               │ • Transparent Linear Pass-Through for |x| <= 0.92 (0% THD)  │
-               │ • C1-Continuous Asymptotic Soft-Knee (Neve/Tape saturation) │
-               │ • Mechanical Relay Bypass Circuit (RL1/RL2 RY-9WK)          │
-               │ • Zero Hard Digital Clipping Artifacts                      │
-               └──────────────────────────────┬──────────────────────────────┘
-                                              │
-                                              ▼
-                             STEREO OUTPUT (Left / Right)
+INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBFS noise floor)
+            │
+            ├─► ORIGIN (level / pan) ─────────────────────────────────────────────┐
+            │                                                                     │
+            └─► pitch detection ─► harmony mode ─► P.CORRECT ─► for each part:    │
+                                                   two-head period-locked shifter │
+                                                   (+ unison shifter)             │
+                                                   RAND.DELAY / LFOs / formant ───┤
+                                                                                  ▼
+                       DSP mix ─► MASTER ─► 16-bit saturation ─► DAC ─► coupling cap ─► L/R
 ```
 
----
+| Element | Source |
+| :--- | :--- |
+| Chips (ADSP-2186M, PCM3003E, H8/3644, NJM4558L, RY-9WK) and 44.1 kHz rate (11.2896 MHz crystal) | HV10 service manual, `reference/78b793.pdf` |
+| Controls, ranges, modes, MIDI channels and CCs, Normal Bypass, factory program 01A (default) | HV10 operator's manual, `reference/a420d5.pdf` |
+| STYLE tables (16 lower + 16 upper) | Text tables inside `DecaBuddy.dll` v1.02; checked against the manual's 3A/3E examples |
+| Shifter, window shape and length, formant law, random-delay LFOs, unison gain/pan/detune, P.CORRECT formula, unvoiced behavior, pan law, 50 ms voicing hold, 2.5-semitone jump confirmation | Reverse engineering of the DSP engine in `DecaBuddy.dll` v1.02 (Akai's software version, ported from DSP code) |
+| Pitch-period rule (window 2× period, shortened only for upward shifts) | IVL Technologies patent US 5,567,901 |
 
-## 🚀 High-Performance Vectorization Benchmarks
-
-ChorusVox DecaBuddy is engineered from the ground up for minimal CPU consumption and rock-solid audio performance:
-* **ARM64 NEON & x86 AVX2 Autocorrelation:** The YIN cumulative mean normalized difference matrix is computed with explicit vector SIMD routines (`vfmaq_f32`), resulting in **zero FFI overhead** and lightning-fast tracking.
-* **Benchmark:** On Apple Silicon, full 4-voice polyphonic stereo processing with Dual enabled processes at **73x faster than real-time** (under 98 ms of CPU time for 7.11 seconds of audio).
-* **Zero Allocations:** Zero heap allocations inside the audio processing loop (`process_block`).
-* **Denormal Protection:** Built-in RAII FTZ/DAZ (`ScopedFtzDaz`) assembly guard protects against denormal floating-point CPU stalls.
+**Known approximations:**
+* **Pitch detection:** uses YIN, a more robust detector. The original uses a zero-crossing/lobe-similarity tracker with a 500 Hz pre-filter. Pitch updates are still stepwise and per analysis, like the DSP.
+* **Style names:** mapping 3H → "7th Major" and 5H → "7th Minor" is inferred. 3A–3G and 5A–5G follow the DLL order.
+* **Fixed-delay length:** the D1–D9 length is scaled from the DSP's random-delay centers. The manual only says "the higher, the longer".
+* **LEVEL steps:** the 3 dB LEVEL steps are an estimate.
+* **CHORD mode:** not implemented. The list of 50 factory chords is not in the available documentation.
+* **Factory programs:** the 100 factory programs are not included. Only program 01A is the default.
+* **Third shifter head:** one extra head avoids cutting an audible grain when the pitch jumps. The original alternates two.
 
 ---
 
 ## 📜 License
 
-ChorusVox DecaBuddy is distributed under the dual **MIT OR Apache-2.0** license. See [LICENSE](LICENSE) for details.
-All original scale presets and hardware circuit topologies are derived from public documentation, schematics, and service manuals of the Akai DecaBuddy HV10 for historical preservation and audio engineering research.
+Dual **MIT OR Apache-2.0**. Scale tables and hardware topology are derived from public Akai documentation and from Akai's DecaBuddy v1.02 software, for historical preservation and audio-engineering research.

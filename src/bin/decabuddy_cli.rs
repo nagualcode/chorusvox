@@ -1,8 +1,9 @@
 //! CLI de validacao, processamento WAV e Benchmark para o ChorusVox / DecaBuddy.
 
 use decabuddy::dsp::FastRng;
-use decabuddy::scales::ScaleId;
-use decabuddy::DecaBuddyProcessor;
+use decabuddy::dsp::RandDelay;
+use decabuddy::scales::StyleId;
+use decabuddy::{Buddies, DecaBuddyProcessor};
 use std::env;
 use std::f32::consts::PI;
 use std::fs::File;
@@ -198,13 +199,13 @@ fn main() -> std::io::Result<()> {
     let out_path = if args.len() >= 3 { args[2].as_str() } else { "decabuddy_rust_output.wav" };
 
     let mut proc = DecaBuddyProcessor::new(sr as f32);
-    proc.host_offline = true;
-    proc.params.key = 0;
-    proc.params.harmonies[0].scale = ScaleId::LowOctave;
-    proc.params.harmonies[1].scale = ScaleId::Unison;
-    proc.params.harmonies[1].enabled = true;
-    proc.params.harmonies[2].scale = ScaleId::High3rdModal1;
-    proc.params.harmonies[3].scale = ScaleId::High5thModal1;
+    // Programa 01A de fabrica (Origin + 3A em H1/H2) mais L2 uma oitava abaixo com unison.
+    proc.params.harmony.key = 0;
+    proc.params.harmony.styles[0] = StyleId::Oct;
+    proc.params.parts[0].buddies = Buddies::OnUnison;
+    proc.params.parts[0].level = 6.0;
+    proc.params.parts[0].formant = -4;
+    proc.params.parts[0].rand_delay = RandDelay::Random(3);
 
     let mut out_l = vec![0.0_f32; input.len()];
     let mut out_r = vec![0.0_f32; input.len()];
