@@ -1,0 +1,14 @@
+[vendor]
+name = "Jardim Sonoro"
+id = "com.jardimsonoro"
+au_manufacturer = "JdSn"
+
+[[plugin]]
+name = "Heave"
+bundle_id = "heave"
+crate = "heave"
+category = "effect"
+vst3_subcategory = "Pitch Shift"
+fourcc = "Heav"
+au_tag = "Music Effects"
+midi_input = true
