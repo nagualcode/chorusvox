@@ -6,7 +6,7 @@ use crate::dsp::{
     unison_delay, Biquad, Butter4, FastRng, PitchShifter, RandDelay, RandomLfo,
     ScopedFtzDaz, ShiftParams, RING_MASK, RING_SIZE,
 };
-use crate::harmony::{HarmonyEngine, HarmonySettings, NUM_PARTS};
+use crate::harmony::{origin_corrected_shift, HarmonyEngine, HarmonySettings, NUM_PARTS};
 use crate::pitch::PitchTracker;
 use crate::programs::{factory_programs, program_change_index, FactoryProgram};
 use crate::scales::{StyleBank, StyleId};
@@ -70,6 +70,8 @@ pub struct OriginParams {
     pub formant: i32,
     pub level: f32,
     pub pan: f32,
+    /// P.CORRECT 0 (--) .. 9. So age no unison/FX: o sinal seco nao passa pelo transpositor.
+    pub p_correct: f32,
     pub rand_delay: RandDelay,
 }
 
@@ -108,7 +110,7 @@ impl Default for Hv10Params {
             master_level: 7.0,
             bypass: false,
             midi_base_channel: 1,
-            origin: OriginParams { buddies: OriginBuddies::OnUnison, formant: 0, level: 9.0, pan: 0.0, rand_delay: RandDelay::Off },
+            origin: OriginParams { buddies: OriginBuddies::OnUnison, formant: 0, level: 9.0, pan: 0.0, p_correct: 0.0, rand_delay: RandDelay::Off },
             parts: [
                 off,
                 off,
@@ -180,7 +182,7 @@ impl PartDsp {
     }
 }
 
-pub struct DecaBuddyProcessor {
+pub struct Hv10Processor {
     pub sample_rate: f32,
     /// Os 100 programas de fabrica (MIDI Program Change).
     pub programs: Vec<FactoryProgram>,
@@ -216,7 +218,7 @@ pub struct DecaBuddyProcessor {
     meter_env: f32,
 }
 
-impl DecaBuddyProcessor {
+impl Hv10Processor {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(8000.0);
         let mut p = Self {
@@ -340,8 +342,9 @@ impl DecaBuddyProcessor {
         }
 
         let o = self.params.origin;
+        let o_shift = if voiced { origin_corrected_shift(self.tracked_midi(), o.p_correct / 9.0) } else { 0.0 };
         self.origin_uni_params =
-            ShiftParams::new(period, -rand_detune_semitones(o.rand_delay), formant_ratio(o.formant));
+            ShiftParams::new(period, o_shift - rand_detune_semitones(o.rand_delay), formant_ratio(o.formant));
     }
 
     pub fn process_block(&mut self, input_mono: &[f32], out_l: &mut [f32], out_r: &mut [f32]) {
@@ -518,7 +521,7 @@ impl DecaBuddyProcessor {
                                 7 => o.level = norm * 9.0,
                                 10 => o.pan = -9.0 + norm * 18.0,
                                 12 => o.formant = (-9.0 + norm * 18.0).round() as i32,
-                                _ => {}
+                                _ => o.p_correct = norm * 9.0,
                             }
                         } else if off <= NUM_PARTS {
                             let pp = &mut self.params.parts[off - 1];
@@ -558,7 +561,7 @@ mod tests {
             .collect()
     }
 
-    fn render(proc: &mut DecaBuddyProcessor, input: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    fn render(proc: &mut Hv10Processor, input: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut l = vec![0.0; input.len()];
         let mut r = vec![0.0; input.len()];
         for ((i, lb), rb) in input.chunks(256).zip(l.chunks_mut(256)).zip(r.chunks_mut(256)) {
@@ -569,7 +572,7 @@ mod tests {
 
     fn estimate_f0(sig: &[f32], sr: f32) -> f32 { crate::pitch::measure_f0(sig, sr) }
 
-    fn solo_part(proc: &mut DecaBuddyProcessor, part: usize, style: StyleId) {
+    fn solo_part(proc: &mut Hv10Processor, part: usize, style: StyleId) {
         proc.params.origin.buddies = OriginBuddies::Off;
         for p in 0..NUM_PARTS {
             proc.params.parts[p].buddies = Buddies::Off;
@@ -596,7 +599,7 @@ mod tests {
             (523.25, 2, StyleId::Oct, 2.0),                // C5 -> C6 (H1 8v, voz aguda)
         ];
         for (f_in, part, style, ratio) in cases {
-            let mut proc = DecaBuddyProcessor::new(sr);
+            let mut proc = Hv10Processor::new(sr);
             solo_part(&mut proc, part, style);
             let input = voice(f_in, sr, 32_768);
             let (l, _) = render(&mut proc, &input);
@@ -609,7 +612,7 @@ mod tests {
     #[test]
     fn origin_path_is_bit_transparent_through_the_codec() {
         let sr = 44_100.0;
-        let mut proc = DecaBuddyProcessor::new(sr);
+        let mut proc = Hv10Processor::new(sr);
         for p in 0..NUM_PARTS { proc.params.parts[p].buddies = Buddies::Off; }
         proc.params.origin.buddies = OriginBuddies::On;
         proc.params.master_level = 9.0;
@@ -626,9 +629,27 @@ mod tests {
     }
 
     #[test]
+    fn origin_p_correct_pulls_the_double_to_the_semitone() {
+        let sr = 44_100.0;
+        // A3 desafinado +35 cents. Em FX so o dobro (transpositor) sai.
+        let f_in = 220.0 * 2.0_f32.powf(35.0 / 1200.0);
+        for (pc, expect_cents) in [(0.0_f32, 35.0_f32), (9.0, 0.0)] {
+            let mut proc = Hv10Processor::new(sr);
+            for p in 0..NUM_PARTS { proc.params.parts[p].buddies = Buddies::Off; }
+            proc.params.origin = OriginParams {
+                buddies: OriginBuddies::Fx, formant: 0, level: 9.0, pan: 0.0, p_correct: pc, rand_delay: RandDelay::Off,
+            };
+            let input = voice(f_in, sr, 32_768);
+            let (l, _) = render(&mut proc, &input);
+            let cents = 1200.0 * (estimate_f0(&l[12_000..32_000], sr) / 220.0).log2();
+            assert!((cents - expect_cents).abs() < 6.0, "P.CORRECT {pc}: {cents} cents, esperado {expect_cents}");
+        }
+    }
+
+    #[test]
     fn unvoiced_input_passes_through_harmonies_in_unison() {
         let sr = 44_100.0;
-        let mut proc = DecaBuddyProcessor::new(sr);
+        let mut proc = Hv10Processor::new(sr);
         solo_part(&mut proc, 2, StyleId::S3A);
         let mut rng = FastRng::new(7);
         let noise: Vec<f32> = (0..16_384).map(|_| rng.next_bipolar() * 0.3).collect();
@@ -642,7 +663,7 @@ mod tests {
     #[test]
     fn note_change_has_no_clicks() {
         let sr = 44_100.0;
-        let mut proc = DecaBuddyProcessor::new(sr);
+        let mut proc = Hv10Processor::new(sr);
         solo_part(&mut proc, 2, StyleId::S3A);
         proc.params.parts[2].rand_delay = RandDelay::Random(5);
         let n1 = 20_000;
@@ -662,7 +683,7 @@ mod tests {
 
     #[test]
     fn midi_cc_controls_levels_and_bypass() {
-        let mut proc = DecaBuddyProcessor::new(44_100.0);
+        let mut proc = Hv10Processor::new(44_100.0);
         proc.handle_midi_event(0xB3, 7, 0); // H1 (base + 3)
         assert_eq!(proc.params.parts[2].level, 0.0);
         proc.handle_midi_event(0xB0, 82, 127);
@@ -673,7 +694,7 @@ mod tests {
 
     #[test]
     fn program_change_loads_factory_program_but_keeps_globals() {
-        let mut proc = DecaBuddyProcessor::new(44_100.0);
+        let mut proc = Hv10Processor::new(44_100.0);
         proc.params.tune_hz = 445.0;
         proc.handle_midi_event(0xC0, 48, 0); // PC 49 -> 49A Synth Vox
         assert_eq!(proc.params.harmony.mode, HarmonyMode::Priority);
@@ -686,7 +707,7 @@ mod tests {
 
     #[test]
     fn smart_mode_keeps_jazz_voicings_with_sustain() {
-        let mut proc = DecaBuddyProcessor::new(44_100.0);
+        let mut proc = Hv10Processor::new(44_100.0);
         proc.params.harmony.mode = HarmonyMode::Smart;
         proc.handle_midi_event(0xB0, 64, 127);
         for &n in &[62u8, 66, 69, 73] {
@@ -703,7 +724,7 @@ mod tests {
     #[test]
     fn digital_overload_clips_like_the_dsp() {
         let sr = 44_100.0;
-        let mut proc = DecaBuddyProcessor::new(sr);
+        let mut proc = Hv10Processor::new(sr);
         proc.params.input_gain_db = 15.0;
         let input = voice(220.0, sr, 8192);
         let (l, _) = render(&mut proc, &input);

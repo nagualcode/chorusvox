@@ -4,9 +4,9 @@ id = "com.jardimsonoro"
 au_manufacturer = "JdSn"
 
 [[plugin]]
-name = "ChorusVox DecaBuddy"
+name = "ChorusVox"
 bundle_id = "chorusvox-decabuddy"
-crate = "decabuddy"
+crate = "chorusvox"
 category = "effect"
 vst3_subcategory = "Pitch Shift"
 fourcc = "DcBd"

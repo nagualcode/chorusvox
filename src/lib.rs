@@ -1,4 +1,4 @@
-//! ChorusVox DecaBuddy: emulacao do Akai DecaBuddy HV10 (Harmony Processing Unit).
+//! ChorusVox: emulacao do Akai DecaBuddy HV10 (Harmony Processing Unit).
 
 pub mod core;
 pub mod dsp;
@@ -9,7 +9,7 @@ pub mod pitch;
 pub mod programs;
 pub mod scales;
 
-pub use crate::core::{Buddies, DecaBuddyProcessor, Hv10Params, InputMeterLeds, OriginBuddies, OriginParams, PartParams};
+pub use crate::core::{Buddies, Hv10Processor, Hv10Params, InputMeterLeds, OriginBuddies, OriginParams, PartParams};
 
 #[cfg(feature = "truce-plugin")]
 pub mod truce_integration {
@@ -167,6 +167,7 @@ pub mod truce_integration {
         #[param(name = "Origin Formant", range = "linear(-9, 9)", default = 0, format = "fmt_signed")] pub org_formant: IntParam,
         #[param(name = "Origin Level", range = "linear(0, 9)", default = 9)] pub org_level: IntParam,
         #[param(name = "Origin Pan", range = "linear(-9, 9)", default = 0, format = "fmt_pan")] pub org_pan: IntParam,
+        #[param(name = "Origin P.Correct", range = "linear(0, 9)", default = 0, format = "fmt_pcorr")] pub org_pcorr: IntParam,
         #[param(name = "Origin R.Delay", range = "linear(0, 18)", default = 0, format = "fmt_rdelay")] pub org_rdelay: IntParam,
 
         #[param(name = "L2", default = 0)] pub l2_buddies: EnumParam<BuddiesChoice>,
@@ -429,6 +430,7 @@ pub mod truce_integration {
                 formant: self.org_formant.value_i32(),
                 level: self.org_level.value_f32(),
                 pan: self.org_pan.value_f32(),
+                p_correct: self.org_pcorr.value_f32(),
                 rand_delay: RandDelay::from_index(self.org_rdelay.value_usize()),
             };
             let deg = |on: bool| if on { TemplateDegree::On } else { TemplateDegree::Off };
@@ -566,6 +568,7 @@ pub mod truce_integration {
         put!(org_formant, p.origin.formant);
         put!(org_level, p.origin.level);
         put!(org_pan, p.origin.pan);
+        put!(org_pcorr, p.origin.p_correct);
         put!(org_rdelay, rd(p.origin.rand_delay));
         macro_rules! part {
             ($i:expr, $b:ident, $st:ident, $sub:ident, $md:ident, $fo:ident, $lv:ident, $pn:ident, $pc:ident, $rdl:ident, $pr:ident, $cv:ident) => {
@@ -626,6 +629,7 @@ pub mod truce_integration {
         sync!(origin.formant);
         sync!(origin.level);
         sync!(origin.pan);
+        sync!(origin.p_correct);
         sync!(origin.rand_delay);
         for p in 0..NUM_PARTS {
             sync!(harmony.styles[p]);
@@ -651,7 +655,7 @@ pub mod truce_integration {
     }
 
     pub struct ChorusVoxDsp {
-        pub core: DecaBuddyProcessor,
+        pub core: Hv10Processor,
         last_host: Option<Hv10Params>,
         mono_scratch: Vec<f32>,
         out_l_scratch: Vec<f32>,
@@ -661,7 +665,7 @@ pub mod truce_integration {
     impl Default for ChorusVoxDsp {
         fn default() -> Self {
             Self {
-                core: DecaBuddyProcessor::new(44_100.0),
+                core: Hv10Processor::new(44_100.0),
                 last_host: None,
                 mono_scratch: vec![0.0; 4096],
                 out_l_scratch: vec![0.0; 4096],

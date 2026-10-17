@@ -15,6 +15,7 @@ org_buddies = 1
 org_formant = 0
 org_level = 6
 org_pan = 0
+org_pcorr = 0
 org_rdelay = 0
 l2_buddies = 0
 l2_style = 0

@@ -419,6 +419,13 @@ fn corrected_shift<F: Fn(i32) -> Option<i32>>(interval: F, input_midi: f32, c: f
     Some(t_base + c * (free - t_base) - input_midi)
 }
 
+/// P.CORRECT da voz original: o DSP chama a mesma rotina (0x10005c50, indice 4) com intervalo 0
+/// em todas as notas, ou seja, correcao cromatica para o semitom mais proximo. `correction` =
+/// P.CORRECT normalizado (0 = --, 1 = 9). Vale em todos os modos (o DSP passa alvo MIDI -1).
+pub fn origin_corrected_shift(input_midi: f32, correction: f32) -> f32 {
+    corrected_shift(|_| Some(0), input_midi, 1.0 - correction.clamp(0.0, 1.0)).unwrap_or(0.0)
+}
+
 impl HarmonyEngine {
     pub fn reset(&mut self) {
         self.midi.reset();

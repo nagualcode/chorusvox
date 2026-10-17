@@ -1,13 +1,13 @@
-# ChorusVox DecaBuddy 🎙️🎛️
+# ChorusVox 🎙️🎛️
 
 [![macOS Supported](https://img.shields.io/badge/platform-macOS%20(AU%20%2F%20VST3)-blue.svg)](#-macos-installation--release-assets)
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green.svg)](LICENSE)
 
-**ChorusVox DecaBuddy** is a Rust emulation of the **Akai DecaBuddy HV10** vocal harmony processor (1 original voice + 4 harmonies + 5 unison voices = 10 voices). It reproduces the unit's controls, harmony modes and processing chain, and adds one modern extra: the **SMART** MIDI mode.
+**ChorusVox** is a Rust emulation of the **Akai DecaBuddy HV10** vocal harmony processor (1 original voice + 4 harmonies + 5 unison voices = 10 voices). It reproduces the unit's controls, harmony modes and processing chain, and adds one modern extra: the **SMART** MIDI mode.
 
 <p align="center">
-  <img src="preview.jpg" alt="ChorusVox DecaBuddy Interface" width="100%">
+  <img src="preview.jpg" alt="ChorusVox Interface" width="100%">
 </p>
 
 ---
@@ -40,7 +40,7 @@ Put ChorusVox on a **vocal track** as an insert effect and sing. The plugin list
 * **Knobs on each strip:**
   * **Level** sets the volume and **Pan** the stereo position.
   * **Formant** changes the voice character without changing the note: negative sounds bigger and deeper, positive smaller and brighter.
-  * **P.Correct** snaps the harmony to exact pitch: `--` follows your natural pitch, 9 is fully locked.
+  * **P.Correct** snaps the harmony to exact pitch: `--` follows your natural pitch, 9 is fully locked. On **ORIGIN** it tunes the doubled copy of your voice to the nearest semitone. Set ORIGIN to `FX` to hear only the corrected voice: that is the HV10's real-time pitch correction.
   * **R.Delay** makes the voice start slightly late. **D** is a fixed delay; **R** is a random delay that sounds like real singers.
 * **Sub / Sub Key / Sub Style:** a second Key and set of Styles that you switch to with one button. Use it to change the harmony for the chorus or a key change. Automate it in your DAW, or send MIDI CC80.
 * **Master** is the output volume, **Input** the input gain, **Tune** the reference pitch (440 Hz by default), and **Bypass** turns the effect off.
@@ -65,7 +65,16 @@ Tips:
 
 ---
 
-## ⚡ What's New in v0.3.5
+## ⚡ What's New in v0.4.0
+
+* **P.CORRECT on the original voice.** The ORIGIN strip has a P.CORRECT knob (`--`, 1–9), like the HV10:
+  * it pulls your voice to the nearest semitone (chromatic, in every mode). The DSP runs the same correction routine as the harmonies, with an interval of 0 on every note;
+  * like FORMANT and R.DELAY on ORIGIN, it acts on the double (`+UN`) and on `FX`; the dry voice is never processed. With `FX` and P.CORRECT 9 you get real-time pitch correction of the lead vocal;
+  * factory programs 21–30, which use ORIGIN P.CORRECT 1, now load it;
+  * MIDI CC13 on the base channel controls it, as on the hardware.
+* **The plugin is now called just "ChorusVox".** The bundles are `ChorusVox.component` and `ChorusVox.vst3`. Remove the old `ChorusVox DecaBuddy` bundles when you install this one. The AU code and VST3 ID are unchanged, so existing sessions find the renamed plugin.
+
+## v0.3.5
 
 * **The editor greys out controls that do nothing in the current setup:**
   * **KEY, SUB and SUB KEY** in FLEXICHORD, MONO CHN., WAIT ALL and PRIORITY. Those modes take their notes from MIDI only.
@@ -152,13 +161,13 @@ v0.3.0 is a rewrite. Controls and DSP now follow the HV10 documentation and the 
 Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ableton Live, Logic Pro, Reaper, Bitwig, Studio One, Cubase, FL Studio, etc.).
 
 1. Open the **[Releases](../../releases)** page of this repository.
-2. Under the latest version, expand **Assets** and download **`ChorusVox-DecaBuddy-macOS-AU-VST3.zip`**.
+2. Under the latest version, expand **Assets** and download **`ChorusVox-macOS-AU-VST3.zip`**.
 3. Extract the archive and copy the bundles:
-   * **Audio Unit (AUv2):** `ChorusVox DecaBuddy.component` → `~/Library/Audio/Plug-Ins/Components/`
-   * **VST3:** `ChorusVox DecaBuddy.vst3` → `~/Library/Audio/Plug-Ins/VST3/`
+   * **Audio Unit (AUv2):** `ChorusVox.component` → `~/Library/Audio/Plug-Ins/Components/`
+   * **VST3:** `ChorusVox.vst3` → `~/Library/Audio/Plug-Ins/VST3/`
 4. If macOS Gatekeeper blocks the plug-in:
    ```bash
-   xattr -cr ~/Library/Audio/Plug-Ins/VST3/ChorusVox\ DecaBuddy.vst3 ~/Library/Audio/Plug-Ins/Components/ChorusVox\ DecaBuddy.component
+   xattr -cr ~/Library/Audio/Plug-Ins/VST3/ChorusVox.vst3 ~/Library/Audio/Plug-Ins/Components/ChorusVox.component
    ```
 5. Restart your DAW to rescan.
 
@@ -175,8 +184,8 @@ Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ablet
    cargo truce reset-au --yes           # flush the AU cache
    cargo truce uninstall --vst3 --au2
    cargo test --release                 # DSP / harmony test suite
-   cargo run --release --bin decabuddy_cli [in.wav] [out.wav]   # offline render + benchmark
-   cargo run --release --bin decabuddy_cli presets presets      # regenerate the 100 factory presets
+   cargo run --release --bin chorusvox_cli [in.wav] [out.wav]   # offline render + benchmark
+   cargo run --release --bin chorusvox_cli presets presets      # regenerate the 100 factory presets
    ```
 
 ---
@@ -222,7 +231,7 @@ Pre-compiled binaries are packaged for **macOS on Apple Silicon (arm64)** (Ablet
 | **Formant** | −9…+9 | Formant shift without pitch change (±25%). |
 | **Level** | 0–9 | 0 = off; 3 dB steps, 9 = 0 dB. |
 | **Pan** | L9 … C … R9 | Pan law of the DSP (−3 dB center). |
-| **P.Correct** | `--`, 1–9 | Pitch correction of the harmony toward the tempered grid. `--` follows the singer's inflection; 9 locks to the grid. |
+| **P.Correct** | `--`, 1–9 | Pitch correction of the harmony toward the tempered grid. `--` follows the singer's inflection; 9 locks to the grid. On ORIGIN it corrects the double (`+UN` / `FX`) to the nearest semitone, in every mode. |
 | **R.Delay** | `--`, D1–D9, R1–R9 | D: fixed delay. R: random delay, three slow LFOs, plus ±1.1 cents of detune per step between a part and its unison. |
 | **Priority** | 1–4 | PRIORITY mode: which received note (1st…4th) this part plays. |
 
@@ -267,6 +276,8 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
             │
             ├─► ORIGIN (level / pan) ─────────────────────────────────────────────┐
             │                                                                     │
+            ├─► ORIGIN double (+UN / FX): chromatic P.CORRECT ─► shifter ─────────┤
+            │                                                                     │
             └─► pitch detection ─► harmony mode ─► P.CORRECT ─► for each part:    │
                                                    two-head period-locked shifter │
                                                    (+ unison shifter)             │
@@ -282,7 +293,7 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
 | STYLE tables (16 lower + 16 upper) | "Preset styles" score in the HV10 operator's manual (p. 31); cross-checked with `DecaBuddy.dll` v1.02 |
 | Factory programs and CHORD shapes | "Preset Program List" (pp. 28–29) and "Preset chords" (p. 30) in the operator's manual |
 | Pitch detector (500 Hz pre-filter, zero-crossing events, period/lobe/slope similarity, 50 ms voicing hold, 2.5-semitone jump check) | `DecaBuddy.dll` v1.02 (0x10008cd0, 0x10008e60, 0x100092d0), verified reading for reading in an x86 emulator |
-| Shifter, window shape and length, formant law, random-delay LFOs, unison gain/pan/detune, P.CORRECT formula, unvoiced behavior, pan law | Reverse engineering of the DSP engine in `DecaBuddy.dll` v1.02 (Akai's software version, ported from DSP code) |
+| Shifter, window shape and length, formant law, random-delay LFOs, unison gain/pan/detune, P.CORRECT formula (including ORIGIN: voice index 4 of 0x10005c50, interval 0 on every note), unvoiced behavior, pan law | Reverse engineering of the DSP engine in `DecaBuddy.dll` v1.02 (Akai's software version, ported from DSP code) |
 | Pitch-period rule (window 2× period, shortened only for upward shifts) | IVL Technologies patent US 5,567,901 |
 
 **Known approximations:**
@@ -291,7 +302,7 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
 * **Fixed-delay length:** the D1–D9 length is scaled from the DSP's random-delay centers. The manual only says "the higher, the longer".
 * **LEVEL steps:** the 3 dB LEVEL steps are an estimate. Akai's DecaBuddy software uses a dB control (−24…0 dB), so it does not reveal the hardware's 0–9 curve.
 * **CHORD mode:** the manual mentions 50 preset chords, but its appendix only documents 8; those 8 are implemented. How chord tones are assigned to the four parts is inferred from the manual's examples.
-* **Factory programs:** a few fields from the manual are not modeled: P.CORRECT on the original voice (programs 21–30), Sub voicing outside STYLE mode, and the Sub template/priority. The printed column header says "L1 L2", but the FLEXICHORD and PRIORITY voicings show the real order is L2, L1.
+* **Factory programs:** a few fields from the manual are not modeled: Sub voicing outside STYLE mode, and the Sub template/priority. The printed column header says "L1 L2", but the FLEXICHORD and PRIORITY voicings show the real order is L2, L1.
 
 **Known artifacts (kept on purpose, as in the original):**
 * **Glides with a high P.CORRECT:** when you glide slowly from a low note to a high one, the harmonies step from note to note. That is what P.CORRECT does. At each step you can hear a short blip and a change in level or timbre. The DSP changes the grain spacing in one step: the new grain briefly overlaps the old one (about +1 dB for a few ms), and the window length, which depends on the interval, changes at once. The plugin reproduces the DSP here. A 10 ms interval glide removed the overlap bump, but it made no measurable difference to the transient at each step, so it was not adopted. Lower P.CORRECT (`--` or 1) makes the harmonies follow the glide smoothly.

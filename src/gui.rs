@@ -290,7 +290,7 @@ impl HvGui {
 
     fn header(&mut self, ui: &mut egui::Ui, state: &Ctx) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("DECABUDDY").size(15.0).strong().color(TEXT));
+            ui.label(egui::RichText::new("CHORUSVOX").size(15.0).strong().color(TEXT));
             ui.label(egui::RichText::new("HV10").size(10.0).color(DIM));
             ui.add_space(10.0);
             let current = self
@@ -476,7 +476,8 @@ impl HvGui {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             self.knob(ui, state, P::OrgLevel.into(), "LEVEL", color, false);
                             self.knob(ui, state, P::OrgPan.into(), "PAN", color, true);
-                            // FORMANT e R.DELAY so atuam no dobro (+UN / FX); a voz seca passa direto.
+                            // FORMANT, P.CORRECT e R.DELAY so atuam no dobro (+UN / FX); a voz seca
+                            // passa direto. P.CORRECT da origem vale em todos os modos, como no DSP.
                             ui.add_enabled_ui(doubled, |ui| {
                                 self.knob(ui, state, P::OrgFormant.into(), "FORMANT", color, true);
                             });
@@ -484,6 +485,7 @@ impl HvGui {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             ui.add_enabled_ui(doubled, |ui| {
+                                self.knob(ui, state, P::OrgPcorr.into(), "P.CORRECT", color, false);
                                 self.knob(ui, state, P::OrgRdelay.into(), "R.DELAY", color, false);
                             });
                         });

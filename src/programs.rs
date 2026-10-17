@@ -1,8 +1,8 @@
 //! Os 100 programas de fabrica do HV10 (bancos 01-50, A/B), transcritos da "Preset Program List"
 //! do manual de operacao (apendice, pags. 28-29). Dados em `factory_programs.txt`.
 //!
-//! Campos do manual que o plugin ainda nao modela sao ignorados: P.CORRECT da voz original
-//! (programas 21-30), Sub VOICING fora do modo STYLE, Sub TEMPLATE e a ordem Sub do PRIORITY.
+//! Campos do manual que o plugin ainda nao modela sao ignorados: Sub VOICING fora do modo STYLE,
+//! Sub TEMPLATE e a ordem Sub do PRIORITY.
 
 use crate::core::{Buddies, Hv10Params, OriginBuddies, OriginParams, PartParams};
 use crate::dsp::RandDelay;
@@ -184,6 +184,7 @@ fn parse_line(line: &str) -> Option<FactoryProgram> {
         formant: signed(o[1]),
         level: o[2].parse().ok()?,
         pan: pan(o[3]),
+        p_correct: pcorr(o[4]),
         rand_delay: rdelay(o[5]),
     };
     Some(FactoryProgram { id: f[0].to_string(), name: f[1].to_string(), params: p })
