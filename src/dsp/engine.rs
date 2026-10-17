@@ -1,4 +1,4 @@
-//! Motor do Heave: liga o rastreador de altura, as marcas de epoca, o plano harmonico e os
+//! Motor do Heaven: liga o rastreador de altura, as marcas de epoca, o plano harmonico e os
 //! shifters PSOLA numa linha do tempo com latencia fixa.
 //!
 //! Linha do tempo: a amostra de entrada `n` sai em `n + L`. Com isso o plano harmonico do

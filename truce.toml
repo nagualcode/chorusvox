@@ -4,9 +4,9 @@ id = "com.jardimsonoro"
 au_manufacturer = "JdSn"
 
 [[plugin]]
-name = "Heave"
-bundle_id = "heave"
-crate = "heave"
+name = "Heaven"
+bundle_id = "heaven"
+crate = "heaven"
 category = "effect"
 vst3_subcategory = "Pitch Shift"
 fourcc = "Heav"

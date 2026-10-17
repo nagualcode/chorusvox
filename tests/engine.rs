@@ -1,7 +1,7 @@
 //! Testes de integracao do motor com uma voz sintetica (trem de pulsos glotais filtrado).
 
-use heave::dsp::harmony::{Mode, Voicing};
-use heave::dsp::{Engine, EngineParams};
+use heaven::dsp::harmony::{Mode, Voicing};
+use heaven::dsp::{Engine, EngineParams};
 
 const SR: f32 = 48_000.0;
 

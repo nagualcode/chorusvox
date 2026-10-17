@@ -1,18 +1,18 @@
 [package]
-name = "heave"
+name = "heaven"
 version = "0.1.0"
 edition = "2021"
-description = "Heave: harmonizador vocal natural em Rust (truce)"
+description = "Heaven: harmonizador vocal natural em Rust (truce)"
 license = "MIT OR Apache-2.0"
 
 [lib]
-name = "heave"
+name = "heaven"
 path = "src/lib.rs"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [[bin]]
-name = "heave_cli"
-path = "src/bin/heave_cli.rs"
+name = "heaven_cli"
+path = "src/bin/heaven_cli.rs"
 
 [features]
 default = ["truce-plugin"]

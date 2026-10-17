@@ -1,9 +1,9 @@
-//! Interface do Heave (egui): plana, escura e compacta, inspirada nos devices do Ableton Live.
+//! Interface do Heaven (egui): plana, escura e compacta, inspirada nos devices do Ableton Live.
 //! Tres paineis: HARMONY (de onde vem a harmonia), VOICES (teclado ao vivo, quantas vozes e onde)
 //! e MIX (cinco botoes). Tudo e parametro do host, entao tudo pode ser automatizado no Live.
 
 use crate::dsp::harmony::{HarmonyCtx, Mode, Voicing, CHORD_NAMES, SCALE_NAMES};
-use crate::truce_integration::{HeaveParams, P};
+use crate::truce_integration::{HeavenParams, P};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use std::collections::HashMap;
 use truce::params::ParamInfo;
@@ -31,14 +31,14 @@ const VOICE_COLORS: [Color32; 4] = [
 ];
 const ROOTS: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
 
-type Ctx = PluginContext<HeaveParams>;
+type Ctx = PluginContext<HeavenParams>;
 
 #[derive(Default)]
-pub struct HeaveGui {
+pub struct HeavenGui {
     infos: HashMap<u32, ParamInfo>,
 }
 
-impl HeaveGui {
+impl HeavenGui {
     fn ensure_infos(&mut self, state: &Ctx) {
         if self.infos.is_empty() {
             for info in state.params().param_infos() {
@@ -62,7 +62,7 @@ impl HeaveGui {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let info = self.infos.get(&id).copied();
         let mut value = state.get_param(id);
-        let acc_id = ui.make_persistent_id(("heave-knob", id));
+        let acc_id = ui.make_persistent_id(("heaven-knob", id));
         if resp.drag_started() {
             state.begin_edit(id);
             ui.memory_mut(|m| m.data.insert_temp(acc_id, value));
@@ -175,7 +175,7 @@ impl HeaveGui {
 
     fn header(&self, ui: &mut egui::Ui, state: &Ctx) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("HEAVE").size(16.0).strong().color(TEXT));
+            ui.label(egui::RichText::new("HEAVEN").size(16.0).strong().color(TEXT));
             ui.label(egui::RichText::new("vocal harmony").size(10.0).color(DIM));
             ui.add_space(14.0);
             self.grid(ui, state, P::Mode.into(), &["CHORD", "SCALE", "MIDI CHORD", "MIDI NOTES"], 4, 330.0, 20.0, ACCENT);
@@ -228,9 +228,9 @@ impl HeaveGui {
                 }
                 ui.add_space(8.0);
                 if mode == Mode::MidiChord {
-                    hint(ui, "Play or record chords on a MIDI track and set\nits output to this track (MIDI To > Heave).\nThe voices pick the best notes of the chord.");
+                    hint(ui, "Play or record chords on a MIDI track and set\nits output to this track (MIDI To > Heaven).\nThe voices pick the best notes of the chord.");
                 } else {
-                    hint(ui, "Each held MIDI note is sung by one voice\n(up to 4). Route a MIDI track to Heave.");
+                    hint(ui, "Each held MIDI note is sung by one voice\n(up to 4). Route a MIDI track to Heaven.");
                 }
             }
         }
@@ -302,7 +302,7 @@ impl HeaveGui {
     }
 }
 
-impl EditorUi<HeaveParams> for HeaveGui {
+impl EditorUi<HeavenParams> for HeavenGui {
     fn ui(&mut self, ui: &mut egui::Ui, state: &Ctx) {
         self.ensure_infos(state);
         ui.ctx().request_repaint();
