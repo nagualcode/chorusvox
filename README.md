@@ -284,6 +284,11 @@ INPUT ─► coupling cap ─► ADC PCM3003E (16-bit, clips at 0 dBFS, ~-98 dBF
 * **CHORD mode:** the manual mentions 50 preset chords, but its appendix only documents 8; those 8 are implemented. How chord tones are assigned to the four parts is inferred from the manual's examples.
 * **Factory programs:** a few fields from the manual are not modeled: P.CORRECT on the original voice (programs 21–30), Sub voicing outside STYLE mode, and the Sub template/priority. The printed column header says "L1 L2", but the FLEXICHORD and PRIORITY voicings show the real order is L2, L1.
 
+**Known artifacts (kept on purpose, as in the original):**
+* **Glides with a high P.CORRECT:** when you glide slowly from a low note to a high one, the harmonies step from note to note. That is what P.CORRECT does. At each step you can hear a short blip and a change in level or timbre. The DSP changes the grain spacing in one step: the new grain briefly overlaps the old one (about +1 dB for a few ms), and the window length, which depends on the interval, changes at once. The plugin reproduces the DSP here. A 10 ms interval glide removed the overlap bump, but it made no measurable difference to the transient at each step, so it was not adopted. Lower P.CORRECT (`--` or 1) makes the harmonies follow the glide smoothly.
+* **Pitch loss during glides:** the pitch detector matches the DLL reading for reading. If it loses the voice during a glide, the harmonies fall back to unison with short grains until it locks again, as on the original.
+* These conclusions come from the DLL's DSP code, not from recordings of a real HV10. Comparing the same dry vocal through Akai's original DecaBuddy software would settle whether the hardware sounds identical.
+
 ---
 
 ## 📜 License
