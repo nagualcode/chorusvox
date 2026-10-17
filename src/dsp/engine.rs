@@ -382,8 +382,11 @@ impl Engine {
         // mistura
         let p = self.params;
         let lead_t = if p.bypass { 1.0 } else { db_to_gain(p.lead_db) };
-        let harm_t = if p.bypass { 0.0 } else { db_to_gain(p.harmony_db) };
         let k = self.active_voice_count();
+        // "Harmony" e o nivel do grupo: soma de potencia normalizada (2 vozes = referencia)
+        let copies = k * if p.double { 2 } else { 1 };
+        let group = (2.0 / copies as f32).sqrt().min(1.2);
+        let harm_t = if p.bypass { 0.0 } else { db_to_gain(p.harmony_db) * group };
         for v in 0..NUM_VOICES {
             self.pans_target[v] = pan_law(pan_position(v, k, p.width));
         }

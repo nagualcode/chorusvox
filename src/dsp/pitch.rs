@@ -81,6 +81,8 @@ pub struct PitchTracker {
     reg_hist: [f32; REG_N],
     reg_head: usize,
     reg_n: usize,
+    /// Diagnostico: resultado cru da ultima analise (antes da mediana).
+    pub last_raw: PitchFrame,
 }
 
 const REG_N: usize = 512;
@@ -140,10 +142,19 @@ impl PitchTracker {
             reg_hist: [0.0; REG_N],
             reg_head: 0,
             reg_n: 0,
+            last_raw: PitchFrame::default(),
         }
     }
 
     pub fn sr(&self) -> f32 { self.sr }
+
+    /// Diagnostico: minimos locais do CMND do ultimo quadro analisado (tau, valor).
+    pub fn debug_cands(&self) -> Vec<(usize, f32)> {
+        (self.tau_min.max(2)..self.tau_max)
+            .filter(|&t| self.cmnd[t] < 0.6 && self.cmnd[t] < self.cmnd[t - 1] && self.cmnd[t] <= self.cmnd[t + 1])
+            .map(|t| (t, self.cmnd[t]))
+            .collect()
+    }
 
     /// Distancia (amostras) entre o fim do sinal escrito e o centro do quadro mais recente.
     pub fn analysis_lag(&self) -> usize { self.w + self.tau_max + 2 * self.hop }
@@ -161,6 +172,7 @@ impl PitchTracker {
         while self.next_t0 + (self.w + self.tau_max) as i64 <= self.written {
             let t0 = self.next_t0;
             let fr = self.analyze(t0);
+            self.last_raw = fr;
             self.finalize(fr);
             self.next_t0 += self.hop as i64;
         }
@@ -271,7 +283,9 @@ impl PitchTracker {
             if let Some(&(t2, v2)) = cands.iter().find(|c| (c.0 as f32 / tau as f32 - 2.0).abs() < 0.08) {
                 let supported = !(recent && self.prev_f0 > 0.0)
                     || (12.0 * (self.sr / t2 as f32 / self.prev_f0).log2()).abs() < 4.0;
-                if supported && v2 < v - 0.04 && v2 < 0.6 * v {
+                // ...a menos que o vale de baixo seja muito mais fundo (erro de oitava evidente)
+                let dramatic = v2 < 0.3 * v && v2 < 0.03;
+                if (supported || dramatic) && v2 < v - 0.04 && v2 < 0.6 * v {
                     tau = t2;
                     v = v2;
                 }
@@ -285,7 +299,7 @@ impl PitchTracker {
                 }
                 let ratio = tau as f32 / t2 as f32;
                 let k = ratio.round();
-                if (2.0..=5.0).contains(&k) && (ratio - k).abs() < 0.04 * k && v2 <= v + 0.025 && v2 < 0.3 {
+                if (2.0..=5.0).contains(&k) && (ratio - k).abs() < 0.04 * k && v2 <= v + 0.025 && v2 < 0.1 {
                     best_t2 = t2;
                 }
             }
