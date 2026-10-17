@@ -27,6 +27,9 @@ pub struct PitchFrame {
     pub db: f32,
     /// Fracao de energia em alta frequencia (sibilancia), 0..1.
     pub hf: f32,
+    /// Melhor estimativa de f0 mesmo em quadros fracamente periodicos (caudas sopradas);
+    /// igual a `f0` nos vozeados, 0 quando nao ha periodicidade aproveitavel.
+    pub f0_weak: f32,
 }
 
 impl PitchFrame {
@@ -273,7 +276,7 @@ impl PitchTracker {
             other => other,
         };
 
-        let mut fr = PitchFrame { t: t_center_base, f0: 0.0, conf: 0.0, aper: 1.0, db, hf };
+        let mut fr = PitchFrame { t: t_center_base, f0: 0.0, conf: 0.0, aper: 1.0, db, hf, f0_weak: 0.0 };
         if let Some((tau, v)) = pick {
             let (mut tau, mut v) = (tau, v);
             // Teste de oitava: se o vale em 2*tau e claramente mais fundo, tau era o 2o harmonico
@@ -332,6 +335,10 @@ impl PitchTracker {
             };
             let voiced = v < thr && db > gate && !sibilant && in_register && (F0_MIN..=F0_MAX).contains(&f0);
             self.voiced_state = voiced;
+            let weak_ok = v < 0.6 && db > gate - 6.0 && hf < 0.25 && in_register && (F0_MIN..=F0_MAX).contains(&f0);
+            if voiced || weak_ok {
+                fr.f0_weak = f0;
+            }
             if voiced {
                 self.reg_hist[self.reg_head] = f0;
                 self.reg_head = (self.reg_head + 1) % REG_N;
@@ -384,6 +391,7 @@ impl PitchTracker {
         } else if a.voiced() && c.voiced() && !b.voiced() && b.hf < 0.3 && b.aper < 0.5 {
             // buraco de um quadro dentro de nota vozeada
             b.f0 = (a.f0 * c.f0).sqrt();
+            b.f0_weak = b.f0;
             b.conf = 0.5 * (a.conf + c.conf);
         } else if !a.voiced() && !c.voiced() && b.voiced() {
             // quadro vozeado isolado: provavelmente ruido
@@ -434,6 +442,9 @@ impl PitchTracker {
         out.t = t;
         if a.voiced() && b.voiced() {
             out.f0 = (a.f0.ln() * (1.0 - x) + b.f0.ln() * x).exp();
+        }
+        if a.f0_weak > 0.0 && b.f0_weak > 0.0 {
+            out.f0_weak = (a.f0_weak.ln() * (1.0 - x) + b.f0_weak.ln() * x).exp();
             out.conf = a.conf * (1.0 - x) + b.conf * x;
         }
         out.db = a.db * (1.0 - x) + b.db * x;

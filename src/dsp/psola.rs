@@ -24,6 +24,8 @@ pub struct VoiceState {
     pub formant: f32,
     /// Ganho dos graos vozeados.
     pub gain: f32,
+    /// Ganho dos graos de trechos fracamente periodicos (caudas sopradas).
+    pub gain_weak: f32,
     /// Ganho dos graos sem vozeamento (consoantes).
     pub gain_uv: f32,
 }
@@ -76,7 +78,7 @@ impl GrainVoice {
                 let ps = st.period.max(8.0);
                 let phi = st.formant.clamp(0.6, 1.6);
                 let h_src = m.period as f64;
-                let g_target = st.gain;
+                let g_target = if m.weak { st.gain_weak } else { st.gain };
                 self.v_gain_state += (g_target - self.v_gain_state) * 0.6;
                 self.uv_gain_state += (st.gain_uv - self.uv_gain_state) * 0.3;
                 // normalizacao de potencia: densidade de graos e duracao do grao

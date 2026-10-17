@@ -16,6 +16,8 @@ pub struct Mark {
     /// Periodo local em amostras (ou o passo da grade fixa, se nao vozeado).
     pub period: f32,
     pub voiced: bool,
+    /// Ciclo de um trecho fracamente periodico (cauda soprada): a harmonia continua, mais baixa.
+    pub weak: bool,
 }
 
 const CAP: usize = 16384;
@@ -35,7 +37,7 @@ impl MarkTracker {
             marks: vec![Mark::default(); CAP],
             count: 0,
             uv_hop,
-            last: Mark { pos: 0.0, period: uv_hop, voiced: false },
+            last: Mark { pos: 0.0, period: uv_hop, voiced: false, weak: false },
             started: false,
         }
     }
@@ -55,7 +57,7 @@ impl MarkTracker {
     pub fn update(&mut self, pt: &PitchTracker, avail: i64) {
         let x = &pt.filtered;
         if !self.started {
-            self.push(Mark { pos: 0.0, period: self.uv_hop, voiced: false });
+            self.push(Mark { pos: 0.0, period: self.uv_hop, voiced: false, weak: false });
             self.started = true;
         }
         loop {
@@ -67,15 +69,20 @@ impl MarkTracker {
                 break;
             }
             let fr = pt.at(guess);
-            if fr.voiced() {
-                let p = pt_period(pt, &fr);
+            // continuacao fraca: so prolonga um trecho vozeado, nunca inicia um
+            let weak = !fr.voiced() && last.voiced && fr.f0_weak > 0.0;
+            if fr.voiced() || weak {
+                let p = pt.sr() / if weak { fr.f0_weak } else { fr.f0 };
                 let need = guess + 1.3 * p as f64 + 2.0;
                 if need as i64 >= avail {
                     break;
                 }
-                let pos = if last.voiced && (p - last.period).abs() < 0.35 * p {
-                    refine_ncc(x, last.pos, guess, p).unwrap_or(guess)
-                } else {
+                let tracked = if last.voiced && (p - last.period).abs() < 0.35 * p { refine_ncc(x, last.pos, guess, p) } else { None };
+                if weak && tracked.is_none() {
+                    self.push(Mark { pos: guess, period: self.uv_hop, voiced: false, weak: false });
+                    continue;
+                }
+                let pos = tracked.unwrap_or_else(|| {
                     // inicio de trecho vozeado: pico do primeiro ciclo
                     let a = guess.floor() as i64;
                     let b = a + p.ceil() as i64;
@@ -89,14 +96,14 @@ impl MarkTracker {
                         }
                     }
                     best as f64
-                };
+                });
                 let pos = pos.max(last.pos + 0.5 * p as f64);
-                self.push(Mark { pos, period: p, voiced: true });
+                self.push(Mark { pos, period: p, voiced: true, weak });
             } else {
                 if guess as i64 + 2 >= avail {
                     break;
                 }
-                self.push(Mark { pos: guess, period: self.uv_hop, voiced: false });
+                self.push(Mark { pos: guess, period: self.uv_hop, voiced: false, weak: false });
             }
         }
     }
@@ -104,7 +111,7 @@ impl MarkTracker {
     /// Marca mais proxima de `s`.
     pub fn nearest(&self, s: f64) -> Mark {
         if self.count == 0 {
-            return Mark { pos: s, period: self.uv_hop, voiced: false };
+            return Mark { pos: s, period: self.uv_hop, voiced: false, weak: false };
         }
         let last = self.count - 1;
         let oldest = self.count.saturating_sub(CAP as u64 - 8);
@@ -124,7 +131,6 @@ impl MarkTracker {
     }
 }
 
-fn pt_period(pt: &PitchTracker, fr: &super::pitch::PitchFrame) -> f32 { pt.sr() / fr.f0 }
 
 /// Procura, em +-15% do periodo em torno de `guess`, a posicao cujo ciclo mais se parece com o
 /// ciclo em torno de `prev` (correlacao normalizada), com refinamento sub-amostra parabolico.

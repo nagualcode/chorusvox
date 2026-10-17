@@ -761,6 +761,7 @@ impl VoiceControl for Ctl<'_> {
             period: if c.midi.is_finite() { self.e.sr / midi_to_hz(c.midi) } else { 0.0 },
             formant: c.formant,
             gain: c.gain,
+            gain_weak: c.gain * 0.55,
             gain_uv: c.gain * uv,
         }
     }
