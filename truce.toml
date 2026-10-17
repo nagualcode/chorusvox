@@ -5,10 +5,10 @@ au_manufacturer = "JdSn"
 
 [[plugin]]
 name = "ChorusVox"
-bundle_id = "chorusvox-decabuddy"
+bundle_id = "chorusvox"
 crate = "chorusvox"
 category = "effect"
 vst3_subcategory = "Pitch Shift"
-fourcc = "DcBd"
+fourcc = "ChVx"
 au_tag = "Music Effects"
 midi_input = true

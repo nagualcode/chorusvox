@@ -65,14 +65,19 @@ Tips:
 
 ---
 
-## ⚡ What's New in v0.4.0
+## ⚡ What's New in v0.4.1
+
+* **New plugin identity.** The bundle ID is now `com.jardimsonoro.chorusvox` and the AU code is `ChVx` (was `DcBd`), so nothing in the plugin carries the DecaBuddy name. Your DAW sees it as a new plugin: sessions saved with v0.4.0 or earlier will not find it. Delete any older ChorusVox bundles before installing.
+* No change to the sound.
+
+## v0.4.0
 
 * **P.CORRECT on the original voice.** The ORIGIN strip has a P.CORRECT knob (`--`, 1–9), like the HV10:
   * it pulls your voice to the nearest semitone (chromatic, in every mode). The DSP runs the same correction routine as the harmonies, with an interval of 0 on every note;
   * like FORMANT and R.DELAY on ORIGIN, it acts on the double (`+UN`) and on `FX`; the dry voice is never processed. With `FX` and P.CORRECT 9 you get real-time pitch correction of the lead vocal;
   * factory programs 21–30, which use ORIGIN P.CORRECT 1, now load it;
   * MIDI CC13 on the base channel controls it, as on the hardware.
-* **The plugin is now called just "ChorusVox".** The bundles are `ChorusVox.component` and `ChorusVox.vst3`. Remove the old `ChorusVox DecaBuddy` bundles when you install this one. The AU code and VST3 ID are unchanged, so existing sessions find the renamed plugin.
+* **The plugin is now called just "ChorusVox".** The bundles are `ChorusVox.component` and `ChorusVox.vst3`. Remove the old `ChorusVox DecaBuddy` bundles when you install this one.
 
 ## v0.3.5
 
