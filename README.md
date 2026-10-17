@@ -65,7 +65,16 @@ Tips:
 
 ---
 
-## ⚡ What's New in v0.3.4
+## ⚡ What's New in v0.3.5
+
+* **The editor greys out controls that do nothing in the current setup:**
+  * **KEY, SUB and SUB KEY** in FLEXICHORD, MONO CHN., WAIT ALL and PRIORITY. Those modes take their notes from MIDI only.
+  * **P.CORRECT** in MONO CHN., WAIT ALL and PRIORITY. There the harmony is already tuned to the MIDI note it receives.
+  * **SUB KEY and SUB STYLE** while SUB is off. While SUB is on, **KEY and STYLE** are greyed instead, because SUB replaces them.
+  * **ORIGIN FORMANT and R.DELAY** unless ORIGIN is on +UN or FX. They only act on the double; the dry voice passes straight through.
+* No change to the sound.
+
+## v0.3.4
 
 * **No more click at the end of fast downward glides.** When the voice slides down and fades, the pitch detector declares it unvoiced and the harmonies switch to short unison grains. The DSP's two heads then restarted grains that were still sounding, which made a short click or crackle. Those grains now finish in a spare head. Everywhere else the shifter still matches the DSP exactly.
   * A new test checks this switch for cuts.

@@ -335,18 +335,26 @@ impl HvGui {
 
     fn global_bar(&mut self, ui: &mut egui::Ui, state: &Ctx) {
         let mode = state.params().mode.index();
+        let sub_on = state.get_param(P::Sub) > 0.5;
         panel(ui, PANEL.gamma_multiply(0.75), |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 self.dropdown(ui, state, P::Mode.into(), "MODE", 96.0, GLOBAL);
-                self.dropdown(ui, state, P::Key.into(), "KEY", 62.0, GLOBAL);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(egui::RichText::new("SUB").size(9.0).color(DIM));
-                    ui.add_space(2.0);
-                    self.toggle(ui, state, P::Sub.into(), "ON", 36.0, GLOBAL);
+                // Controles que nao fazem nada no modo atual ficam cinza (desabilitados).
+                ui.add_enabled_ui(mode_uses_key(mode) && !sub_on, |ui| {
+                    self.dropdown(ui, state, P::Key.into(), "KEY", 62.0, GLOBAL);
                 });
-                self.dropdown(ui, state, P::SubKey.into(), "SUB KEY", 62.0, GLOBAL);
+                ui.add_enabled_ui(mode_uses_key(mode), |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(egui::RichText::new("SUB").size(9.0).color(DIM));
+                        ui.add_space(2.0);
+                        self.toggle(ui, state, P::Sub.into(), "ON", 36.0, GLOBAL);
+                    });
+                });
+                ui.add_enabled_ui(mode_uses_key(mode) && sub_on, |ui| {
+                    self.dropdown(ui, state, P::SubKey.into(), "SUB KEY", 62.0, GLOBAL);
+                });
                 ui.add_space(4.0);
                 self.knob(ui, state, P::Input.into(), "INPUT", GLOBAL, true);
                 self.knob(ui, state, P::Master.into(), "MASTER", GLOBAL, false);
@@ -403,6 +411,7 @@ impl HvGui {
             (Self::plain(state, ids.buddies) > 0.5, ids.buddies)
         };
         let accent = if on { color } else { color.gamma_multiply(0.45) };
+        let doubled = v == 0 && Self::plain(state, P::OrgBuddies.into()) > 1.5;
 
         {
             ui.painter().rect_filled(frame_rect, CornerRadius::same(3), PANEL);
@@ -435,8 +444,13 @@ impl HvGui {
                                 0 => {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
-                                        self.dropdown(ui, state, ids.style, "STYLE", inner / 2.0 - 14.0, color);
-                                        self.dropdown(ui, state, ids.sub_style, "SUB STYLE", inner / 2.0 - 14.0, color);
+                                        let sub_on = state.get_param(P::Sub) > 0.5;
+                                        ui.add_enabled_ui(!sub_on, |ui| {
+                                            self.dropdown(ui, state, ids.style, "STYLE", inner / 2.0 - 14.0, color);
+                                        });
+                                        ui.add_enabled_ui(sub_on, |ui| {
+                                            self.dropdown(ui, state, ids.sub_style, "SUB STYLE", inner / 2.0 - 14.0, color);
+                                        });
                                     });
                                 }
                                 1 => self.dropdown(ui, state, ids.modal, "MODAL VOICING", inner - 10.0, color),
@@ -462,11 +476,16 @@ impl HvGui {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             self.knob(ui, state, P::OrgLevel.into(), "LEVEL", color, false);
                             self.knob(ui, state, P::OrgPan.into(), "PAN", color, true);
-                            self.knob(ui, state, P::OrgFormant.into(), "FORMANT", color, true);
+                            // FORMANT e R.DELAY so atuam no dobro (+UN / FX); a voz seca passa direto.
+                            ui.add_enabled_ui(doubled, |ui| {
+                                self.knob(ui, state, P::OrgFormant.into(), "FORMANT", color, true);
+                            });
                         });
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            self.knob(ui, state, P::OrgRdelay.into(), "R.DELAY", color, false);
+                            ui.add_enabled_ui(doubled, |ui| {
+                                self.knob(ui, state, P::OrgRdelay.into(), "R.DELAY", color, false);
+                            });
                         });
                     } else {
                         let ids = part_ids(v - 1);
@@ -478,7 +497,10 @@ impl HvGui {
                         });
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            self.knob(ui, state, ids.pcorr, "P.CORRECT", color, false);
+                            // Nos modos de nota MIDI a harmonia ja sai afinada na nota recebida.
+                            ui.add_enabled_ui(mode_uses_pcorrect(mode), |ui| {
+                                self.knob(ui, state, ids.pcorr, "P.CORRECT", color, false);
+                            });
                             self.knob(ui, state, ids.rdelay, "R.DELAY", color, false);
                         });
                     }
@@ -654,6 +676,16 @@ impl EditorUi<ChorusVoxParams> for HvGui {
             }
         });
     }
+}
+
+/// STYLE, MODAL, SMART e CHORD usam KEY (e portanto SUB / SUB KEY); os demais modos so MIDI.
+fn mode_uses_key(mode: u32) -> bool {
+    matches!(mode, 0 | 1 | 6 | 7)
+}
+
+/// MONO CHN., WAIT ALL e PRIORITY afinam na nota MIDI recebida e ignoram P.CORRECT.
+fn mode_uses_pcorrect(mode: u32) -> bool {
+    !matches!(mode, 3..=5)
 }
 
 fn panel(ui: &mut egui::Ui, fill: Color32, add: impl FnOnce(&mut egui::Ui)) {
