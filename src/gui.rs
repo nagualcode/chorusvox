@@ -1,6 +1,7 @@
 //! Interface do Heaven (egui): plana, escura e compacta, inspirada nos devices do Ableton Live.
-//! Tres paineis: HARMONY (de onde vem a harmonia), VOICES (teclado ao vivo, quantas vozes e onde)
-//! e MIX (cinco botoes). Tudo e parametro do host, entao tudo pode ser automatizado no Live.
+//! Quatro paineis: TUNE (correcao do lead), HARMONY (de onde vem a harmonia), VOICES (teclado ao
+//! vivo, quantas vozes e onde) e MIX (cinco botoes). Tudo e parametro do host, entao tudo pode ser
+//! automatizado no Live.
 
 use crate::dsp::harmony::{HarmonyCtx, Mode, Voicing, CHORD_NAMES, SCALE_NAMES};
 use crate::truce_integration::{HeavenParams, P};
@@ -10,7 +11,7 @@ use truce::params::ParamInfo;
 use truce::prelude::*;
 use truce_egui::EditorUi;
 
-pub const WIDTH: u32 = 820;
+pub const WIDTH: u32 = 974;
 pub const HEIGHT: u32 = 300;
 
 const BG: Color32 = Color32::from_rgb(30, 30, 30);
@@ -178,6 +179,8 @@ impl HeavenGui {
             ui.label(egui::RichText::new("HEAVEN").size(16.0).strong().color(TEXT));
             ui.label(egui::RichText::new("vocal harmony").size(10.0).color(DIM));
             ui.add_space(14.0);
+            self.toggle(ui, state, P::Harmonies.into(), "HARMONIES", 78.0);
+            ui.add_space(4.0);
             self.grid(ui, state, P::Mode.into(), &["CHORD", "SCALE", "MIDI CHORD", "MIDI NOTES"], 4, 330.0, 20.0, ACCENT);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 Self::meter(ui, state, &[P::MeterOutL.into(), P::MeterOutR.into()], 18.0);
@@ -188,6 +191,29 @@ impl HeavenGui {
                 self.toggle(ui, state, P::Bypass.into(), "BYPASS", 60.0);
             });
         });
+    }
+
+    fn tune_panel(&self, ui: &mut egui::Ui, state: &Ctx) {
+        let w = ui.available_width();
+        self.toggle(ui, state, P::Tune.into(), "LEAD TUNE", w);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            self.knob(ui, state, P::Retune.into(), "RETUNE", false);
+            self.knob(ui, state, P::TuneAmount.into(), "AMOUNT", false);
+        });
+        ui.add_space(8.0);
+        self.toggle(ui, state, P::Chromatic.into(), "CHROMATIC", w);
+        ui.add_space(8.0);
+        let on = state.get_param(P::Tune) > 0.5;
+        let lead = state.get_meter(P::MeterLead);
+        ui.horizontal(|ui| {
+            caption(ui, "CORRECTION");
+            let text = if on && lead > 0.0 { format!("{:+.0} ct", 100.0 * state.get_meter(P::MeterShift)) } else { "—".to_string() };
+            ui.label(egui::RichText::new(text).size(12.0).strong().color(TEXT));
+        });
+        ui.add_space(2.0);
+        let chromatic = state.get_param(P::Chromatic) > 0.5;
+        hint(ui, if chromatic { "Every semitone is a target." } else { "Targets the notes of the\nkey in HARMONY." });
     }
 
     fn harmony_panel(&self, ui: &mut egui::Ui, state: &Ctx, mode: Mode) {
@@ -313,8 +339,8 @@ impl EditorUi<HeavenParams> for HeavenGui {
             self.header(ui, state);
             ui.add_space(4.0);
             let (area, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-            let widths = [290.0, 278.0, area.width() - 290.0 - 278.0 - 16.0];
-            let titles = ["HARMONY", "VOICES", "MIX"];
+            let widths = [146.0, 290.0, 278.0, area.width() - 146.0 - 290.0 - 278.0 - 24.0];
+            let titles = ["TUNE", "HARMONY", "VOICES", "MIX"];
             let mut x = area.left();
             for (k, &pw) in widths.iter().enumerate() {
                 let rect = Rect::from_min_size(Pos2::new(x, area.top()), Vec2::new(pw, area.height()));
@@ -325,8 +351,9 @@ impl EditorUi<HeavenParams> for HeavenGui {
                 child.label(egui::RichText::new(titles[k]).size(11.0).strong().color(TEXT));
                 child.add_space(2.0);
                 match k {
-                    0 => self.harmony_panel(&mut child, state, mode),
-                    1 => self.voices_panel(&mut child, state, mode),
+                    0 => self.tune_panel(&mut child, state),
+                    1 => self.harmony_panel(&mut child, state, mode),
+                    2 => self.voices_panel(&mut child, state, mode),
                     _ => self.mix_panel(&mut child, state),
                 }
                 x += pw + 8.0;

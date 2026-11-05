@@ -13,6 +13,7 @@ use super::harmony::{choose_voicing, just_offset, HarmonyCtx, Mode, VoiceNotes, 
 use super::marks::MarkTracker;
 use super::pitch::PitchTracker;
 use super::psola::{max_half_len, GrainVoice, VoiceControl, VoiceState};
+use super::tune::{nearest_allowed, LeadTuner, TuneInput};
 use super::util::{db_to_gain, hz_to_midi, midi_to_hz, smoothstep, Biquad, Drift, HannTable, Ring, Rng};
 
 /// Vozes de harmonia + as dobras (uma por harmonia).
@@ -44,6 +45,16 @@ pub struct EngineParams {
     pub pure: bool,
     /// Dobra cada harmonia (dois cantores por voz).
     pub double: bool,
+    /// Vozes de harmonia ligadas. Desligadas, o Heaven e so a correcao do lead.
+    pub harmonies: bool,
+    /// Correcao de afinacao do lead.
+    pub tune: bool,
+    /// Tempo de correcao (ms): 0 = gruda na nota, acima de ~20 ms o vibrato passa.
+    pub retune_ms: f32,
+    /// Fracao da correcao aplicada, 0..1.
+    pub tune_amount: f32,
+    /// Corrige para qualquer semitom, ignorando a tonalidade do contexto harmonico.
+    pub chromatic: bool,
     pub bypass: bool,
 }
 
@@ -63,6 +74,11 @@ impl Default for EngineParams {
             formant: 0.0,
             pure: true,
             double: false,
+            harmonies: true,
+            tune: false,
+            retune_ms: 20.0,
+            tune_amount: 1.0,
+            chromatic: false,
             bypass: false,
         }
     }
@@ -85,7 +101,10 @@ impl Default for VoiceCtrl {
 #[derive(Clone, Copy, Debug, Default)]
 struct CtrlFrame {
     v: [VoiceCtrl; NUM_VOICES],
+    /// Altura do lead depois da correcao (0 = sem voz).
     lead_midi: f32,
+    /// Correcao aplicada ao lead (semitons).
+    lead_shift: f32,
 }
 
 /// Estado de "humano" de cada cantor virtual.
@@ -178,6 +197,9 @@ pub struct Engine {
     rng: Rng,
 
     voices: Vec<GrainVoice>,
+    tuner: LeadTuner,
+    lead_tuned: [GrainVoice; 2],
+    tune_mix: f32,
     hpf: [Biquad; NUM_VOICES],
     shelf: [Biquad; NUM_VOICES],
     lead_gain: f32,
@@ -187,6 +209,8 @@ pub struct Engine {
 
     /// Medidores para a interface.
     pub meter_lead: f32,
+    /// Correcao aplicada ao lead (semitons).
+    pub meter_shift: f32,
     pub meter_voices: [f32; MAX_VOICES],
 }
 
@@ -234,6 +258,9 @@ impl Engine {
             singers,
             rng,
             voices: (0..NUM_VOICES).map(|_| GrainVoice::new()).collect(),
+            tuner: LeadTuner::default(),
+            lead_tuned: [GrainVoice::transparent(), GrainVoice::transparent()],
+            tune_mix: 0.0,
             hpf: [Biquad::highpass(sr64, 75.0, 0.707); NUM_VOICES],
             shelf: [Biquad::high_shelf(sr64, 9000.0, -1.5); NUM_VOICES],
             lead_gain: 1.0,
@@ -241,6 +268,7 @@ impl Engine {
             pans: [(0.707, 0.707); NUM_VOICES],
             pans_target: [(0.707, 0.707); NUM_VOICES],
             meter_lead: 0.0,
+            meter_shift: 0.0,
             meter_voices: [0.0; MAX_VOICES],
         }
     }
@@ -378,6 +406,11 @@ impl Engine {
             voice.plan(until, &self.input, &self.marks, &Ctl { e: self, v }, &self.hann);
         }
         self.voices = voices;
+        let mut lead_tuned = std::mem::take(&mut self.lead_tuned);
+        let [tuned_l, tuned_r] = &mut lead_tuned;
+        tuned_l.plan(until, &self.dry_l, &self.marks, &LeadCtl { e: self }, &self.hann);
+        tuned_r.plan(until, &self.dry_r, &self.marks, &LeadCtl { e: self }, &self.hann);
+        self.lead_tuned = lead_tuned;
 
         // mistura
         let p = self.params;
@@ -387,6 +420,7 @@ impl Engine {
         let copies = k * if p.double { 2 } else { 1 };
         let group = (2.0 / copies as f32).sqrt().min(1.2);
         let harm_t = if p.bypass { 0.0 } else { db_to_gain(p.harmony_db) * group };
+        let tune_t = if p.tune && !p.bypass { 1.0 } else { 0.0 };
         for v in 0..NUM_VOICES {
             self.pans_target[v] = pan_law(pan_position(v, k, p.width));
         }
@@ -395,7 +429,10 @@ impl Engine {
             let tau = n0 + i as i64 - lat;
             self.lead_gain += (lead_t - self.lead_gain) * a;
             self.harm_gain += (harm_t - self.harm_gain) * a;
-            let (mut l, mut r) = (self.dry_l.at(tau) * self.lead_gain, self.dry_r.at(tau) * self.lead_gain);
+            self.tune_mix += (tune_t - self.tune_mix) * a;
+            let m = self.tune_mix;
+            let (tl, tr) = (self.lead_tuned[0].take(tau), self.lead_tuned[1].take(tau));
+            let (mut l, mut r) = ((self.dry_l.at(tau) * (1.0 - m) + tl * m) * self.lead_gain, (self.dry_r.at(tau) * (1.0 - m) + tr * m) * self.lead_gain);
             for v in 0..NUM_VOICES {
                 let x = self.voices[v].take(tau);
                 let pt = self.pans_target[v];
@@ -416,6 +453,7 @@ impl Engine {
         // medidores (instante de saida mais recente)
         let f = self.frame_at(tau_end);
         self.meter_lead = if f.lead_midi > 0.0 { f.lead_midi } else { 0.0 };
+        self.meter_shift = if f.lead_midi > 0.0 { f.lead_shift } else { 0.0 };
         for v in 0..MAX_VOICES {
             let c = f.v[v];
             self.meter_voices[v] = if c.midi.is_finite() && c.gain > 0.05 { c.midi } else { 0.0 };
@@ -439,6 +477,22 @@ impl Engine {
         let oldest = self.frame_count.saturating_sub(CTRL_CAP as u64 - 4);
         let k = k.clamp(oldest, last);
         self.frames[(k % CTRL_CAP as u64) as usize]
+    }
+
+    /// Correcao do lead (semitons) interpolada no instante `t`.
+    fn shift_at(&self, t: f64) -> f32 {
+        if self.frame_count == 0 {
+            return 0.0;
+        }
+        let x = (t / self.hop as f64).max(0.0);
+        let last = self.frame_count - 1;
+        let oldest = self.frame_count.saturating_sub(CTRL_CAP as u64 - 4);
+        let k0 = (x.floor() as u64).clamp(oldest, last);
+        let k1 = (k0 + 1).min(last);
+        let f = (x - k0 as f64).clamp(0.0, 1.0) as f32;
+        let a = self.frames[(k0 % CTRL_CAP as u64) as usize].lead_shift;
+        let b = self.frames[(k1 % CTRL_CAP as u64) as usize].lead_shift;
+        a + (b - a) * f
     }
 
     /// Controle interpolado de uma voz no instante `t`.
@@ -473,8 +527,8 @@ impl Engine {
     // Plano harmonico
     // -----------------------------------------------------------------------------------------
 
-    /// Nota em que o lead vai estabilizar nos ultimos ~25 ms da janela de antecipacao.
-    fn future_stable_note(&self, t: f64) -> Option<i32> {
+    /// Altura em que o lead vai estabilizar nos ultimos ~25 ms da janela de antecipacao.
+    fn future_stable_pitch(&self, t: f64) -> Option<f32> {
         let hop = self.hop as f64;
         let n = (self.lookahead / hop).floor() as i32;
         let mut vals = [0.0f32; 16];
@@ -496,12 +550,32 @@ impl Engine {
         if v[c - 1] - v[0] > 1.0 {
             return None;
         }
-        Some(v[c / 2].round() as i32)
+        Some(v[c / 2])
     }
 
-    /// Nota de inicio de frase: mediana dos quadros vozeados de toda a janela de antecipacao
+    /// Altura mediana em torno de `t` (a correcao escolhe a nota por ela).
+    fn centered_pitch(&self, t: f64) -> Option<f32> {
+        let hop = self.hop as f64;
+        let mut vals = [0.0f32; 13];
+        let mut c = 0;
+        for j in -6..=6 {
+            let fr = self.pitch.at(t + j as f64 * hop);
+            if fr.voiced() {
+                vals[c] = hz_to_midi(fr.f0);
+                c += 1;
+            }
+        }
+        if c == 0 {
+            return None;
+        }
+        let v = &mut vals[..c];
+        v.sort_by(f32::total_cmp);
+        Some(v[c / 2])
+    }
+
+    /// Altura de inicio de frase: mediana dos quadros vozeados de toda a janela de antecipacao
     /// (robusta a um quadro errado no ataque).
-    fn onset_note(&self, t: f64) -> Option<i32> {
+    fn onset_pitch(&self, t: f64) -> Option<f32> {
         let hop = self.hop as f64;
         let n = (self.lookahead / hop).floor() as usize;
         let mut vals = [0.0f32; 32];
@@ -518,7 +592,7 @@ impl Engine {
         }
         let v = &mut vals[..c];
         v.sort_by(f32::total_cmp);
-        Some(v[c / 2].round() as i32)
+        Some(v[c / 2])
     }
 
     fn control_frame(&mut self, t: f64) -> CtrlFrame {
@@ -550,17 +624,43 @@ impl Engine {
         let ctx_soon = self.ctx_at(t + 0.08 * self.sr as f64);
         let mut ctx = ctx_now;
 
+        // correcao do lead: daqui em diante o plano harmonico enxerga a voz ja corrigida, entao
+        // as harmonias acompanham a nota que sai, e nao a que foi cantada
+        let tuning = params.tune && !params.bypass;
+        let scale_of = |c: &HarmonyCtx| if params.chromatic { 0 } else { c.chord_for(0).1 };
+        let (mask_now, mask_next) = (scale_of(&ctx_now), scale_of(&ctx_soon));
+        if tuning {
+            if voiced {
+                let input = TuneInput {
+                    pitch: p,
+                    center: self.centered_pitch(t).unwrap_or(p),
+                    mask_now,
+                    mask_next,
+                    retune_s: params.retune_ms.max(0.0) / 1000.0,
+                    amount: params.tune_amount,
+                };
+                p += self.tuner.step(&input, dt);
+            } else {
+                self.tuner.step_unvoiced(dt);
+            }
+        } else {
+            self.tuner.reset();
+        }
+        let plan_note = |pitch: f32| {
+            if tuning && params.tune_amount >= 0.5 { nearest_allowed(pitch, mask_next) } else { pitch.round() as i32 }
+        };
+
         let mut switched = false;
         let mut new_note: Option<i32> = self.plan.note;
         if voiced {
             self.plan.unvoiced_time = 0.0;
-            let future = self.future_stable_note(t).filter(|&f| {
+            let future = self.future_stable_pitch(t).map(plan_note).filter(|&f| {
                 // durante uma suspeita de oitava, nao aceita a nota uma oitava acima/abaixo
                 !(octave_suspect || self.plan.note.is_some_and(|nn| (f - nn).abs() % 12 == 0 && f != nn && self.plan.octave_time < 0.12))
             });
             match self.plan.note {
                 None => {
-                    new_note = Some(future.or_else(|| self.onset_note(t)).unwrap_or(p.round() as i32));
+                    new_note = Some(future.or_else(|| self.onset_pitch(t).map(plan_note)).unwrap_or(p.round() as i32));
                     switched = true;
                 }
                 Some(nn) => {
@@ -649,7 +749,7 @@ impl Engine {
 
         // ------------------------------------------------------------------ alvos por voz
         let hum = params.humanize.clamp(0.0, 1.0);
-        let mut out = CtrlFrame { lead_midi: if voiced { p } else { 0.0 }, ..Default::default() };
+        let mut out = CtrlFrame { lead_midi: if voiced { p } else { 0.0 }, lead_shift: self.tuner.shift(), ..Default::default() };
         let lead = self.plan.note;
         let mut dev = 0.0;
         if let (Some(nn), true) = (lead, voiced) {
@@ -698,7 +798,7 @@ impl Engine {
             let base_v = v % MAX_VOICES;
             let is_double = v >= MAX_VOICES;
             let note = self.plan.harm[base_v];
-            let wanted = base_v < k && note.is_some() && (!is_double || params.double) && !params.bypass;
+            let wanted = base_v < k && note.is_some() && (!is_double || params.double) && params.harmonies && !params.bypass;
             let sg = &mut self.singers[v];
             // humanizacao: deriva de afinacao, tempo e nivel
             let pitch_sigma = (2.0 + 9.0 * hum) * if is_double { 1.3 } else { 1.0 };
@@ -764,6 +864,22 @@ impl VoiceControl for Ctl<'_> {
             gain_weak: c.gain * 0.55,
             gain_uv: c.gain * uv,
         }
+    }
+}
+
+/// Visao do lead corrigido para o shifter: sem atraso, e cada periodo de saida e o periodo da
+/// marca lida com a correcao aplicada (relativa: um erro de oitava nao move a voz).
+struct LeadCtl<'a> {
+    e: &'a Engine,
+}
+
+impl VoiceControl for LeadCtl<'_> {
+    fn delay(&self, _c: f64) -> f64 { 0.0 }
+
+    fn state(&self, s: f64) -> VoiceState {
+        let m = self.e.marks.nearest(s);
+        let gain = if self.e.params.tune || self.e.tune_mix > 1e-4 { 1.0 } else { 0.0 };
+        VoiceState { period: m.period * (-self.e.shift_at(s) / 12.0).exp2(), formant: 1.0, gain, gain_weak: gain, gain_uv: gain }
     }
 }
 

@@ -4,6 +4,7 @@
 //!   mode=chord|scale|midichord|midinotes  root=C..B  chord=Maj|Min|7|...  scale=major|minor|...
 //!   voicing=above|below|around|wide  voices=1..4  harmony=dB  lead=dB  humanize=0..1
 //!   width=0..1  formant=-1..1  pure=0|1  double=0|1  block=512
+//!   harmonies=0|1  tune=0|1  retune=ms  amount=0..1  chromatic=0|1   correcao do lead
 //!   chords="0:Am,4:F,8:C"         linha do tempo de acordes (segundos:acorde), como automacao
 //!   midi="0-4:57,60,64;4-8:53,57" notas MIDI seguradas por intervalo de tempo (segundos)
 //!   compensate=1                  remove a latencia do arquivo de saida (padrao 1)
@@ -118,6 +119,11 @@ fn main() {
             "formant" => p.formant = v.parse().unwrap(),
             "pure" => p.pure = v != "0",
             "double" => p.double = v != "0",
+            "harmonies" => p.harmonies = v != "0",
+            "tune" => p.tune = v != "0",
+            "retune" => p.retune_ms = v.parse().unwrap(),
+            "amount" => p.tune_amount = v.parse().unwrap(),
+            "chromatic" => p.chromatic = v != "0",
             "block" => block = v.parse().unwrap(),
             "compensate" => compensate = v != "0",
             "dump" => dump = Some(v.to_string()),

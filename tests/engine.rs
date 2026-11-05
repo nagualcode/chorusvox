@@ -1,6 +1,7 @@
 //! Testes de integracao do motor com uma voz sintetica (trem de pulsos glotais filtrado).
 
 use heaven::dsp::harmony::{Mode, Voicing};
+use heaven::dsp::pitch::PitchTracker;
 use heaven::dsp::{Engine, EngineParams};
 
 const SR: f32 = 48_000.0;
@@ -130,5 +131,196 @@ fn harmony_follows_lead_melody_in_scale_mode() {
         let v = sorted_targets(&eng, 0.6 * k as f32 + 0.4);
         assert!((v[0] - want).abs() < 0.3, "nota {k}: {v:?}");
     }
+}
+
+
+// ------------------------------------------------------------------------------ correcao do lead
+
+const LAT: usize = (SR * 0.08) as usize;
+
+fn tuned_only() -> EngineParams {
+    EngineParams { tune: true, harmonies: false, retune_ms: 0.0, chromatic: true, ..Default::default() }
+}
+
+/// Altura (MIDI) detectada no sinal em cada quadro de 4 ms entre `a` e `b` segundos.
+fn track(x: &[f32], a: f32, b: f32) -> Vec<f32> {
+    let mut pt = PitchTracker::new(SR);
+    pt.push(x);
+    let (mut t, mut v) = (a, Vec::new());
+    while t < b {
+        let fr = pt.at((t * SR) as f64);
+        if fr.voiced() {
+            v.push(69.0 + 12.0 * (fr.f0 / 440.0).log2());
+        }
+        t += 0.004;
+    }
+    v
+}
+
+fn median(mut v: Vec<f32>) -> f32 {
+    v.sort_by(f32::total_cmp);
+    v[v.len() / 2]
+}
+
+fn rms(x: &[f32]) -> f32 { (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt() }
+
+#[test]
+fn sharp_singer_lands_on_the_note() {
+    for sung in [36.3, 40.35, 48.3, 60.35, 69.2, 79.3, 84.2] {
+        let x = voice(1.5, |_| sung);
+        let mut eng = Engine::new(SR);
+        let (l, _) = run(&mut eng, &x, |e, _| e.set_params(&tuned_only()));
+        let got = median(track(&l, 0.5, 1.4));
+        assert!((got - sung.round()).abs() < 0.03, "cantou {sung}, saiu {got}");
+    }
+}
+
+#[test]
+fn correction_works_at_other_sample_rates() {
+    // o mesmo sinal lido a outra taxa soa em outra altura: basta conferir a nota resultante
+    let x = voice(2.0, |_| 60.0);
+    for sr in [44_100.0f32, 96_000.0, 192_000.0] {
+        let mut eng = Engine::new(sr);
+        let (l, _) = run(&mut eng, &x, |e, _| e.set_params(&tuned_only()));
+        let mut pt = PitchTracker::new(sr);
+        pt.push(&l);
+        let at = |q: f32| pt.at((q * x.len() as f32) as f64);
+        let v: Vec<f32> = (0..200).map(|k| at(0.5 + k as f32 * 0.002)).filter(|f| f.voiced()).map(|f| 69.0 + 12.0 * (f.f0 / 440.0).log2()).collect();
+        let got = median(v);
+        assert!((got - got.round()).abs() < 0.04, "{sr} Hz: saiu {got}");
+    }
+}
+
+#[test]
+fn tuned_lead_has_flat_level() {
+    // se o trecho vozeado virasse consoante por falta de marcas, ou os graos desalinhassem,
+    // o nivel oscilaria aqui
+    for sung in [36.3, 40.35, 60.35, 79.3, 84.2] {
+        let x = voice(1.5, |_| sung);
+        let mut eng = Engine::new(SR);
+        let (l, _) = run(&mut eng, &x, |e, _| e.set_params(&tuned_only()));
+        let win = (SR * 0.03) as usize;
+        let ripple = |s: &[f32]| {
+            let (lo, hi) = s.chunks_exact(win).map(rms).fold((f32::MAX, 0.0f32), |(a, b), v| (a.min(v), b.max(v)));
+            20.0 * (hi / lo).log10()
+        };
+        let (a, b) = ((SR * 0.4) as usize, (SR * 1.4) as usize);
+        let extra = ripple(&l[a..b]) - ripple(&x[a..b]);
+        let level = 20.0 * (rms(&l[a..b]) / rms(&x[a..b])).log10();
+        assert!(extra < 0.5, "midi {sung}: ondulacao {extra} dB alem do seco");
+        assert!(level.abs() < 1.0, "midi {sung}: nivel {level} dB em relacao ao seco");
+    }
+}
+
+#[test]
+fn in_tune_singer_passes_almost_unchanged() {
+    let x = voice(1.5, |_| 60.0);
+    let mut eng = Engine::new(SR);
+    let (l, _) = run(&mut eng, &x, |e, _| e.set_params(&tuned_only()));
+    let (a, b) = ((SR * 0.5) as usize, (SR * 1.3) as usize);
+    let err: Vec<f32> = (a..b).map(|i| l[i] - x[i - LAT]).collect();
+    let snr = 20.0 * (rms(&x[a..b]) / rms(&err)).log10();
+    assert!(snr > 30.0, "SNR {snr} dB");
+}
+
+#[test]
+fn level_stays_flat_across_voiced_unvoiced_edges() {
+    // vogal, ruido de consoante, vogal: a emenda nao pode criar buraco nem pico
+    let mut x = voice(1.6, |_| 57.3);
+    let mut rng = heaven::dsp::util::Rng::new(7);
+    let (a, b) = ((SR * 0.7) as usize, (SR * 0.85) as usize);
+    let level = rms(&x[..a]);
+    for v in &mut x[a..b] {
+        *v = (rng.uniform() - 0.5) * 3.4 * level;
+    }
+    let mut eng = Engine::new(SR);
+    let (l, _) = run(&mut eng, &x, |e, _| e.set_params(&tuned_only()));
+    let win = (SR * 0.005) as usize;
+    for k in (((SR * 0.5) as usize)..((SR * 1.2) as usize)).step_by(win) {
+        let dry = rms(&x[k..k + 3 * win]);
+        let out = rms(&l[k + LAT..k + LAT + 3 * win]);
+        let db = 20.0 * (out / dry).log10();
+        assert!(db.abs() < 3.0, "t={:.3}s: {db} dB em relacao ao seco", k as f32 / SR);
+    }
+}
+
+#[test]
+fn vibrato_survives_a_natural_retune_and_is_flattened_at_zero() {
+    let sung = |t: f32| 60.3 + 0.4 * (std::f32::consts::TAU * 5.5 * t).sin();
+    let x = voice(2.5, sung);
+    let spread = |retune_ms: f32| {
+        let mut eng = Engine::new(SR);
+        let p = EngineParams { retune_ms, ..tuned_only() };
+        let (l, _) = run(&mut eng, &x, |e, _| e.set_params(&p));
+        let v = track(&l, 1.0, 2.3);
+        let (lo, hi) = v.iter().fold((f32::MAX, f32::MIN), |(a, b), &m| (a.min(m), b.max(m)));
+        (hi - lo, (lo + hi) / 2.0)
+    };
+    let (natural, center) = spread(60.0);
+    let (flat, _) = spread(0.0);
+    assert!(natural > 0.45, "vibrato com retune natural: {natural}");
+    assert!((center - 60.0).abs() < 0.1, "centro {center}");
+    assert!(flat < 0.2, "vibrato com retune 0: {flat}");
+}
+
+#[test]
+fn correction_follows_the_scale_and_the_harmony_follows_the_correction() {
+    // cantor em C#4 + 20 cents, em do maior: o lead vai para D4 e a harmonia nasce de D4
+    let x = voice(1.5, |_| 61.2);
+    let mut eng = Engine::new(SR);
+    let p = EngineParams {
+        tune: true,
+        retune_ms: 0.0,
+        mode: Mode::Scale,
+        root: 0,
+        scale: 0,
+        voices: 1,
+        humanize: 0.0,
+        pure: false,
+        ..Default::default()
+    };
+    run(&mut eng, &x, |e, _| e.set_params(&p));
+    let (lead, _) = eng.debug_targets((1.0 * SR) as f64);
+    assert!((lead - 62.0).abs() < 0.05, "lead {lead}");
+    let harmony = sorted_targets(&eng, 1.0);
+    assert!(harmony.len() == 1 && (harmony[0] - 65.0).abs() < 0.05, "terca diatonica acima de D4: {harmony:?}");
+}
+
+#[test]
+fn harmonies_off_tune_off_is_the_delayed_input() {
+    let x = voice(1.0, |_| 60.0);
+    let mut eng = Engine::new(SR);
+    let p = EngineParams { harmonies: false, ..Default::default() };
+    let (l, r) = run(&mut eng, &x, |e, _| e.set_params(&p));
+    for i in (SR * 0.3) as usize..x.len() {
+        assert!((l[i] - x[i - LAT]).abs() < 1e-6 && (r[i] - x[i - LAT]).abs() < 1e-6, "amostra {i}");
+    }
+}
+
+#[test]
+fn tuned_lead_keeps_the_stereo_image() {
+    let x = voice(1.2, |_| 60.3);
+    let half: Vec<f32> = x.iter().map(|v| v * 0.5).collect();
+    let mut eng = Engine::new(SR);
+    let (mut ol, mut or) = (vec![0.0; x.len()], vec![0.0; x.len()]);
+    for (k, (a, b)) in x.chunks(256).zip(half.chunks(256)).enumerate() {
+        eng.set_params(&tuned_only());
+        let pos = k * 256;
+        let (l, r) = (&mut ol[pos..pos + a.len()], &mut or[pos..pos + a.len()]);
+        eng.process(a, b, l, r);
+    }
+    let (s, e) = ((SR * 0.5) as usize, (SR * 1.1) as usize);
+    let db = 20.0 * (rms(&or[s..e]) / rms(&ol[s..e])).log10();
+    assert!((db + 6.02).abs() < 0.2, "L/R {db} dB");
+}
+
+#[test]
+fn toggling_tune_does_not_click() {
+    let x = voice(2.0, |_| 60.3);
+    let mut eng = Engine::new(SR);
+    let (l, _) = run(&mut eng, &x, |e, t| e.set_params(&EngineParams { tune: (1.0..1.5).contains(&t), harmonies: false, retune_ms: 0.0, chromatic: true, ..Default::default() }));
+    let steady = (((SR * 0.5) as usize)..((SR * 0.9) as usize)).map(|i| (l[i + 1] - l[i]).abs()).fold(0.0f32, f32::max);
+    let edge = (((SR * 0.95) as usize)..((SR * 1.8) as usize)).map(|i| (l[i + 1] - l[i]).abs()).fold(0.0f32, f32::max);
+    assert!(edge < steady * 1.6, "degrau {edge} contra {steady}");
 }
 

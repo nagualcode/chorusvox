@@ -1,0 +1,137 @@
+name: Release
+
+# Uma tag v* compila, valida e publica os binarios numa release do GitHub.
+# Em pull requests, ou rodando manualmente (Actions > Release > Run workflow), gera e valida os
+# mesmos pacotes como artefatos da execucao, sem publicar nada.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TRUCE_VERSION: "6.3.0"
+  PLUGINVAL_VERSION: "v1.0.4"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # sem --release: com panic=abort, `cargo test --release` nao liga os binarios
+      - run: cargo test --locked --no-default-features
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS-AppleSilicon
+            runner: macos-14
+            formats: --au2 --vst3
+          - name: Windows-x64
+            runner: windows-2022
+            formats: --vst3
+          - name: Linux-x64
+            runner: ubuntu-22.04 # glibc mais antiga: o binario roda em mais distribuicoes
+            formats: --vst3
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Dependencias do sistema (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxrandr-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
+            libwayland-dev libasound2-dev libjack-jackd2-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            mesa-vulkan-drivers xvfb unzip
+
+      - name: Cache do cargo-truce
+        id: cargo-truce
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-truce
+            ~/.cargo/bin/cargo-truce.exe
+          key: cargo-truce-${{ env.CARGO_TRUCE_VERSION }}-${{ matrix.runner }}
+
+      - name: Instala o cargo-truce
+        if: steps.cargo-truce.outputs.cache-hit != 'true'
+        run: cargo install cargo-truce --version ${{ env.CARGO_TRUCE_VERSION }} --locked
+
+      - name: Compila os plugins
+        run: cargo truce build ${{ matrix.formats }}
+
+      - name: Valida o Audio Unit
+        if: runner.os == 'macOS'
+        run: |
+          # num runner novo o macOS so enxerga o AU instalado no sistema e depois de um novo scan
+          sudo "$HOME/.cargo/bin/cargo-truce" install --system --au2 --no-build
+          cargo truce reset-au --yes
+          sleep 5
+          cargo truce validate --auval
+
+      # O pluginval abre o binario de verdade em cada sistema: e a prova de que o plugin carrega.
+      - name: Valida o VST3
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            macOS)   asset=macOS;   run=(./pv/pluginval.app/Contents/MacOS/pluginval) ;;
+            Windows) asset=Windows; run=(./pv/pluginval.exe) ;;
+            Linux)   asset=Linux;   run=(xvfb-run -a ./pv/pluginval) ;;
+          esac
+          curl -fsSL -o pluginval.zip \
+            "https://github.com/Tracktion/pluginval/releases/download/$PLUGINVAL_VERSION/pluginval_$asset.zip"
+          unzip -oq pluginval.zip -d pv
+          chmod +x pv/pluginval pv/pluginval.app/Contents/MacOS/pluginval 2>/dev/null || true
+          "${run[@]}" --strictness-level 10 --validate-in-process --timeout-ms 300000 target/bundles/Heaven.vst3
+
+      - name: Empacota
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd target/bundles
+          case "$RUNNER_OS" in
+            macOS)   zip -qry "$GITHUB_WORKSPACE/dist/Heaven-${{ matrix.name }}.zip" Heaven.component Heaven.vst3 ;;
+            Windows) 7z a -bso0 "$GITHUB_WORKSPACE/dist/Heaven-${{ matrix.name }}.zip" Heaven.vst3 ;;
+            Linux)   tar -czf "$GITHUB_WORKSPACE/dist/Heaven-${{ matrix.name }}.tar.gz" Heaven.vst3 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Heaven-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publica
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist
+          gh release create "$TAG" dist/* --title "Heaven $TAG" --generate-notes --verify-tag
