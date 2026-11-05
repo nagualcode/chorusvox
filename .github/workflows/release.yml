@@ -77,7 +77,10 @@ jobs:
       - name: Valida o Audio Unit
         if: runner.os == 'macOS'
         run: |
-          cargo truce install --au2 --no-build
+          # num runner novo o macOS so enxerga o AU instalado no sistema e depois de um novo scan
+          sudo "$HOME/.cargo/bin/cargo-truce" install --system --au2 --no-build
+          cargo truce reset-au --yes
+          sleep 5
           cargo truce validate --auval
 
       # O pluginval abre o binario de verdade em cada sistema: e a prova de que o plugin carrega.
