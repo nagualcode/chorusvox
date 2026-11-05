@@ -5,6 +5,7 @@ pub mod harmony;
 pub mod marks;
 pub mod pitch;
 pub mod psola;
+pub mod tune;
 pub mod util;
 
 pub use engine::{Engine, EngineParams};

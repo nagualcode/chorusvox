@@ -91,6 +91,11 @@ pub mod truce_integration {
         #[param(name = "Pure Tuning", default = true)] pub pure: BoolParam,
         #[param(name = "Double", default = false)] pub double: BoolParam,
         #[param(name = "Bypass", default = false)] pub bypass: BoolParam,
+        #[param(name = "Harmonies", default = true)] pub harmonies: BoolParam,
+        #[param(name = "Lead Tune", default = false)] pub tune: BoolParam,
+        #[param(name = "Retune", range = "linear(0, 200)", default = 20.0, unit = "ms")] pub retune: FloatParam,
+        #[param(name = "Tune Amount", range = "linear(0, 1)", default = 1.0, unit = "%")] pub tune_amount: FloatParam,
+        #[param(name = "Chromatic", default = false)] pub chromatic: BoolParam,
 
         #[meter] pub meter_in: MeterSlot,
         #[meter] pub meter_out_l: MeterSlot,
@@ -103,6 +108,8 @@ pub mod truce_integration {
         #[meter] pub meter_v4: MeterSlot,
         /// Notas MIDI seguradas (mascara de classes de altura, para a interface).
         #[meter] pub meter_midi: MeterSlot,
+        /// Correcao aplicada ao lead (semitons).
+        #[meter] pub meter_shift: MeterSlot,
     }
 
     impl HeavenParams {
@@ -121,6 +128,11 @@ pub mod truce_integration {
                 formant: self.character.read(),
                 pure: self.pure.value(),
                 double: self.double.value(),
+                harmonies: self.harmonies.value(),
+                tune: self.tune.value(),
+                retune_ms: self.retune.read(),
+                tune_amount: self.tune_amount.read(),
+                chromatic: self.chromatic.value(),
                 bypass: self.bypass.value(),
             }
         }
@@ -257,6 +269,7 @@ pub mod truce_integration {
             ctx.set_meter(P::MeterV3, mv[2]);
             ctx.set_meter(P::MeterV4, mv[3]);
             ctx.set_meter(P::MeterMidi, state.midi_mask as f32);
+            ctx.set_meter(P::MeterShift, state.engine.meter_shift);
             ProcessStatus::Normal
         }
 

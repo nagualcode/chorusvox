@@ -108,6 +108,19 @@ impl MarkTracker {
         }
     }
 
+    /// Primeira marca depois de `pos`, se ja existir.
+    pub fn next_after(&self, pos: f64) -> Option<Mark> {
+        if self.count == 0 || pos >= self.get(self.count - 1).pos {
+            return None;
+        }
+        let (mut lo, mut hi) = (self.count.saturating_sub(CAP as u64 - 8), self.count - 1);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if self.get(mid).pos <= pos { lo = mid } else { hi = mid }
+        }
+        Some(if self.get(lo).pos > pos { *self.get(lo) } else { *self.get(hi) })
+    }
+
     /// Marca mais proxima de `s`.
     pub fn nearest(&self, s: f64) -> Mark {
         if self.count == 0 {

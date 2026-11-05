@@ -1,10 +1,11 @@
 # Heaven
 
-**Harmonizador vocal para macOS (Apple Silicon), AU e VST3, escrito em Rust com o
-framework [truce](https://github.com/truce-audio/truce).**
+**Harmonizador vocal e corretor de afinação para macOS (Apple Silicon), Windows e Linux, em AU
+e VST3, escrito em Rust com o framework [truce](https://github.com/truce-audio/truce).**
 
 O Heaven põe até 4 vozes de harmonia (8 com **Double**) sobre a sua voz e soa como cantores de
 verdade logo de cara, sem horas de ajustes: poucas opções, todas automatizáveis no Ableton.
+Ele também corrige a afinação da voz principal, com ou sem as harmonias.
 
 ![Interface](docs/gui.png)
 
@@ -12,17 +13,21 @@ verdade logo de cara, sem horas de ajustes: poucas opções, todas automatizáve
 
 ## Instalação
 
-1. Baixe `Heaven-macOS-AppleSilicon-AU-VST3.zip` na página de [Releases](../../releases).
-2. Copie os bundles:
-   * **AU:** `Heaven.component` → `~/Library/Audio/Plug-Ins/Components/`
-   * **VST3:** `Heaven.vst3` → `~/Library/Audio/Plug-Ins/VST3/`
-3. Se o macOS bloquear o plugin (Gatekeeper):
-   ```bash
-   xattr -cr ~/Library/Audio/Plug-Ins/Components/Heaven.component ~/Library/Audio/Plug-Ins/VST3/Heaven.vst3
-   ```
-4. Reinicie o DAW. No Live: *Plug-Ins → Audio Units → Jardim Sonoro → Heaven*.
+Baixe o pacote do seu sistema na página de [Releases](../../releases).
 
-Só Apple Silicon (arm64).
+| Sistema | Pacote | Formatos | Onde copiar |
+|---|---|---|---|
+| macOS (Apple Silicon) | `Heaven-macOS-AppleSilicon.zip` | AU, VST3 | `~/Library/Audio/Plug-Ins/Components/` (AU) e `~/Library/Audio/Plug-Ins/VST3/` (VST3) |
+| Windows (x64) | `Heaven-Windows-x64.zip` | VST3 | `C:\Program Files\Common Files\VST3\` |
+| Linux (x64) | `Heaven-Linux-x64.tar.gz` | VST3 | `~/.vst3/` |
+
+No macOS, se o Gatekeeper bloquear o plugin:
+
+```bash
+xattr -cr ~/Library/Audio/Plug-Ins/Components/Heaven.component ~/Library/Audio/Plug-Ins/VST3/Heaven.vst3
+```
+
+Reinicie o DAW. No Live: *Plug-Ins → Audio Units → Jardim Sonoro → Heaven* (ou *VST3*).
 
 ## Uso no Ableton Live
 
@@ -51,6 +56,27 @@ Só Apple Silicon (arm64).
    * **Pure Tuning**: afina os intervalos com o lead em entonação justa, como um grupo
      a cappella.
    * **Double**: dois cantores por voz.
+
+### Correção de afinação da voz principal
+
+No painel **TUNE**:
+
+* **LEAD TUNE** liga a correção. Desligada, a voz principal passa intacta.
+* **RETUNE** é a velocidade. Em 0 ms a voz gruda na nota e o vibrato some (o efeito robótico).
+  Por volta de 20 ms (padrão) a correção é natural e o vibrato mais lento passa. Acima disso,
+  ela só acerta o desvio médio da nota.
+* **AMOUNT** é quanto da correção é aplicada.
+* **CHROMATIC** aceita qualquer semitom como alvo. Desligado, os alvos seguem o painel HARMONY:
+  * *CHORD*: a escala do acorde atual, que pode ser automatizado na timeline;
+  * *SCALE*: a tonalidade escolhida;
+  * *MIDI CHORD* e *MIDI NOTES*: as notas MIDI seguradas (sem nenhuma, qualquer semitom).
+
+**Só afinação, sem harmonias:** ligue **LEAD TUNE** e desligue **HARMONIES** no topo. Depois
+escolha **SCALE**, a tonalidade e a escala. O Heaven funciona então como um auto-tune da voz
+principal. Com as duas opções ligadas, as harmonias nascem da nota já corrigida.
+
+Os formantes ficam onde estão, então o timbre da voz não muda com a correção. Bypass desliga as
+duas coisas, sem cliques.
 
 **Latência:** 80 ms, reportada ao host. O Live compensa automaticamente na reprodução e na
 mixagem. Para gravar ouvindo a harmonia ao vivo o atraso é perceptível: grave a voz seca e use
@@ -171,6 +197,21 @@ descontar a escala intencional de formantes, o erro de envelope fica abaixo de 1
 +12 semitons. O plugin roda a ~50× o tempo real no pior caso (4 vozes + Double a 96 kHz) e passa
 no `auval` e no `pluginval` em rigor 10.
 
+### A correção do lead em voz real
+
+Medido em 60 s de cada um de três vocais reais, com alvos cromáticos. O desvio é a distância
+até o semitom mais próximo, medida na saída. O RETUNE de 20 ms preserva o vibrato de propósito,
+e por isso mantém o desvio mais alto. A coluna de nível é a faixa p1–p99 em relação ao seco, em
+janelas de 10 ms.
+
+| | desvio mediano | nível |
+|---|---|---|
+| voz original | 11–21 cents | |
+| RETUNE 20 ms | 6–8 cents | −1,9 a +1,6 dB |
+| RETUNE 0 ms | 1,3–2,4 cents | −1,9 a +1,5 dB |
+
+Com a harmonia desligada, a correção roda a mais de 130× o tempo real.
+
 ### Lado a lado com o Harmony Engine
 
 Mesmo trecho vocal, uma voz em terça diatônica acima:
@@ -198,6 +239,13 @@ Mesmo trecho vocal, uma voz em terça diatônica acima:
   * janela de Hann de 2 períodos e interpolação cúbica fracionária;
   * normalização de potência pela densidade de grãos;
   * atrasos humanizados repetem ou pulam ciclos inteiros, sem efeito Doppler.
+* **Correção do lead:**
+  * o resultado é um deslocamento em semitons sobre o período de cada marca, então um erro de
+    oitava do detector não salta a voz;
+  * a nota alvo tem histerese e só troca sem chegar à vizinha depois de 150 ms, o que segura
+    vibratos largos e descentrados;
+  * os grãos somam normalizados pela soma das janelas, sem buracos nas emendas com consoantes;
+  * os canais L e R são processados com as mesmas marcas, preservando a imagem estéreo.
 * **Plano harmônico:**
   * 30 ms de lookahead e histerese contra o vibrato;
   * notas das vozes por busca exaustiva com custo de arranjo vocal;
@@ -217,14 +265,26 @@ Mesmo trecho vocal, uma voz em terça diatônica acima:
 
 ```bash
 cargo truce install --au2 --vst3            # compila, assina e instala
-cargo test --release --no-default-features  # testes de teoria musical e do motor
+cargo test --no-default-features            # testes de teoria musical e do motor
 cargo run --release --no-default-features --bin heaven_cli -- voz.wav saida.wav \
     mode=chord voices=3 voicing=around chords="0:Am,4:F,8:C,12:G" double=1
+cargo run --release --no-default-features --bin heaven_cli -- voz.wav saida.wav \
+    tune=1 harmonies=0 retune=20 mode=scale root=A scale=minor
 cargo truce screenshot --out docs/gui.png
 ```
 
 O `heaven_cli` roda o mesmo motor do plugin offline. Ele aceita uma linha do tempo de acordes
 (como a automação do Live), notas MIDI por intervalo e `dump=arquivo.csv` com o pitch detectado
 e as notas alvo de cada voz.
+
+Para publicar uma versão, atualize `version` no `Cargo.toml` e envie uma tag:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+O workflow `.github/workflows/release.yml` compila em cada sistema, valida com `pluginval`
+(e `auval` no macOS) e publica os pacotes na release. Em pull requests ele gera e valida os mesmos
+pacotes, sem publicar.
 
 Licença: MIT ou Apache-2.0.
