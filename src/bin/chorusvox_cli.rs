@@ -1,6 +1,6 @@
-//! Render offline do Heaven (mesmo motor do plugin) e benchmark.
+//! Render offline do ChorusVox (mesmo motor do plugin) e benchmark.
 //!
-//! heaven_cli <entrada.wav> <saida.wav> [chave=valor ...]
+//! chorusvox_cli <entrada.wav> <saida.wav> [chave=valor ...]
 //!   mode=chord|scale|midichord|midinotes  root=C..B  chord=Maj|Min|7|...  scale=major|minor|...
 //!   voicing=above|below|around|wide  voices=1..4  harmony=dB  lead=dB  humanize=0..1
 //!   width=0..1  formant=-1..1  pure=0|1  double=0|1  block=512
@@ -9,8 +9,8 @@
 //!   midi="0-4:57,60,64;4-8:53,57" notas MIDI seguradas por intervalo de tempo (segundos)
 //!   compensate=1                  remove a latencia do arquivo de saida (padrao 1)
 
-use heaven::dsp::harmony::{Mode, Voicing, CHORD_NAMES, NOTE_NAMES, SCALE_NAMES};
-use heaven::dsp::{Engine, EngineParams};
+use chorusvox::dsp::harmony::{Mode, Voicing, CHORD_NAMES, NOTE_NAMES, SCALE_NAMES};
+use chorusvox::dsp::{Engine, EngineParams};
 use std::time::Instant;
 
 fn parse_note(s: &str) -> Option<(u8, usize)> {
@@ -74,7 +74,7 @@ fn read_wav(path: &str) -> (Vec<f32>, Vec<f32>, u32) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("uso: heaven_cli <entrada.wav> <saida.wav> [chave=valor ...]");
+        eprintln!("uso: chorusvox_cli <entrada.wav> <saida.wav> [chave=valor ...]");
         std::process::exit(2);
     }
     let (in_l, in_r, sr) = read_wav(&args[1]);

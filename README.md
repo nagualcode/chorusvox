@@ -1,290 +1,291 @@
-# Heaven
+# ChorusVox
 
-**Harmonizador vocal e corretor de afinação para macOS (Apple Silicon), Windows e Linux, em AU
-e VST3, escrito em Rust com o framework [truce](https://github.com/truce-audio/truce).**
+**Vocal harmonizer and pitch corrector for macOS (Apple Silicon), Windows and Linux, as AU and
+VST3, written in Rust with the [truce](https://github.com/truce-audio/truce) framework.**
 
-O Heaven põe até 4 vozes de harmonia (8 com **Double**) sobre a sua voz e soa como cantores de
-verdade logo de cara, sem horas de ajustes: poucas opções, todas automatizáveis no Ableton.
-Ele também corrige a afinação da voz principal, com ou sem as harmonias.
+ChorusVox puts up to 4 harmony voices (8 with **Double**) on top of your voice and sounds like
+real singers right away, without hours of tweaking: few options, all automatable in Ableton
+Live. It also corrects the pitch of the lead vocal, with or without the harmonies.
+
+Formerly known as Heaven.
 
 ![Interface](docs/gui.png)
 
 ---
 
-## Instalação
+## Installation
 
-Baixe o pacote do seu sistema na página de [Releases](../../releases).
+Download the package for your system from the [Releases](../../releases) page.
 
-| Sistema | Pacote | Formatos | Onde copiar |
+| System | Package | Formats | Copy to |
 |---|---|---|---|
-| macOS (Apple Silicon) | `Heaven-macOS-AppleSilicon.zip` | AU, VST3 | `~/Library/Audio/Plug-Ins/Components/` (AU) e `~/Library/Audio/Plug-Ins/VST3/` (VST3) |
-| Windows (x64) | `Heaven-Windows-x64.zip` | VST3 | `C:\Program Files\Common Files\VST3\` |
-| Linux (x64) | `Heaven-Linux-x64.tar.gz` | VST3 | `~/.vst3/` |
+| macOS (Apple Silicon) | `ChorusVox-macOS-AppleSilicon.zip` | AU, VST3 | `~/Library/Audio/Plug-Ins/Components/` (AU) and `~/Library/Audio/Plug-Ins/VST3/` (VST3) |
+| Windows (x64) | `ChorusVox-Windows-x64.zip` | VST3 | `C:\Program Files\Common Files\VST3\` |
+| Linux (x64) | `ChorusVox-Linux-x64.tar.gz` | VST3 | `~/.vst3/` |
 
-No macOS, se o Gatekeeper bloquear o plugin:
+On macOS, if Gatekeeper blocks the plugin:
 
 ```bash
-xattr -cr ~/Library/Audio/Plug-Ins/Components/Heaven.component ~/Library/Audio/Plug-Ins/VST3/Heaven.vst3
+xattr -cr ~/Library/Audio/Plug-Ins/Components/ChorusVox.component ~/Library/Audio/Plug-Ins/VST3/ChorusVox.vst3
 ```
 
-Reinicie o DAW. No Live: *Plug-Ins → Audio Units → Jardim Sonoro → Heaven* (ou *VST3*).
+Restart your DAW. In Live: *Plug-Ins → Audio Units → Jardim Sonoro → ChorusVox* (or *VST3*).
 
-## Uso no Ableton Live
+## Using it in Ableton Live
 
-1. Coloque o **Heaven** como efeito na faixa de voz.
-2. Escolha de onde vem a harmonia (botões no topo):
-   * **CHORD**: escolha **Root** e **Chord**. Para mudar os acordes ao longo da música,
-     automatize *Root* e *Chord* na timeline. A troca acontece exatamente no ponto desenhado.
-     Se você antecipa o tempo forte ao cantar, a nota que começa até 80 ms antes da troca já
-     usa o acorde seguinte.
-   * **SCALE**: só a tonalidade (**Key** + **Scale**). As vozes andam em terças diatônicas, sem
-     precisar de acordes.
-   * **MIDI CHORD**: toque ou grave acordes numa faixa MIDI. Na faixa MIDI, em *MIDI To*,
-     escolha a faixa de voz e depois *Heaven*. As vozes escolhem as melhores notas do acorde.
-   * **MIDI NOTES**: cada nota MIDI segurada vira uma voz (até 4), na altura exata.
-3. **VOICES** (1–4) e **VOICING**:
-   * *Above*: harmonia fechada acima do lead.
-   * *Below*: abaixo.
-   * *Around*: acima e abaixo.
-   * *Wide*: acorde aberto.
+1. Put **ChorusVox** as an effect on the vocal track.
+2. Choose where the harmony comes from (buttons at the top):
+   * **CHORD**: pick a **Root** and a **Chord**. To change chords through the song, automate
+     *Root* and *Chord* on the timeline. The change happens exactly at the drawn point. If you
+     sing ahead of the downbeat, a note starting up to 80 ms before the change already uses the
+     next chord.
+   * **SCALE**: just the key (**Key** + **Scale**). The voices move in diatonic thirds, with no
+     chords needed.
+   * **MIDI CHORD**: play or record chords on a MIDI track. On that track, under *MIDI To*, pick
+     the vocal track and then *ChorusVox*. The voices choose the best notes of the chord.
+   * **MIDI NOTES**: each held MIDI note becomes a voice (up to 4), at that exact pitch.
+3. **VOICES** (1–4) and **VOICING**:
+   * *Above*: close harmony above the lead.
+   * *Below*: below it.
+   * *Around*: above and below.
+   * *Wide*: open chord.
 4. **MIX**:
-   * **Harmony**: nível do grupo de vozes. Mudar o número de vozes não muda o volume.
-   * **Lead**: nível da voz original. No mínimo, sai só a harmonia.
-   * **Humanize**: quanto cada cantor virtual difere: atraso, deriva de afinação, timbre e nível.
-   * **Width**: abertura estéreo.
-   * **Character**: garganta mais longa (voz mais escura) ou mais curta (mais clara).
-   * **Pure Tuning**: afina os intervalos com o lead em entonação justa, como um grupo
-     a cappella.
-   * **Double**: dois cantores por voz.
+   * **Harmony**: level of the voice group. Changing the number of voices does not change the
+     volume.
+   * **Lead**: level of the lead vocal. At minimum, only the harmony comes out.
+   * **Humanize**: how much each virtual singer differs: delay, pitch drift, timbre and level.
+   * **Width**: stereo spread.
+   * **Character**: longer throat (darker voice) or shorter (brighter).
+   * **Pure Tuning**: tunes the intervals with the lead in just intonation, like an a cappella
+     group.
+   * **Double**: two singers per voice.
 
-### Correção de afinação da voz principal
+### Lead vocal pitch correction
 
-No painel **TUNE**:
+In the **TUNE** panel:
 
-* **LEAD TUNE** liga a correção. Desligada, a voz principal passa intacta.
-* **RETUNE** é a velocidade. Em 0 ms a voz gruda na nota e o vibrato some (o efeito robótico).
-  Por volta de 20 ms (padrão) a correção é natural e o vibrato mais lento passa. Acima disso,
-  ela só acerta o desvio médio da nota.
-* **AMOUNT** é quanto da correção é aplicada.
-* **CHROMATIC** aceita qualquer semitom como alvo. Desligado, os alvos seguem o painel HARMONY:
-  * *CHORD*: a escala do acorde atual, que pode ser automatizado na timeline;
-  * *SCALE*: a tonalidade escolhida;
-  * *MIDI CHORD* e *MIDI NOTES*: as notas MIDI seguradas (sem nenhuma, qualquer semitom).
+* **LEAD TUNE** turns the correction on. When it is off, the lead vocal passes untouched.
+* **RETUNE** is the speed. At 0 ms the voice locks to the note and vibrato disappears (the
+  robotic effect). Around 20 ms (the default) the correction sounds natural and slower vibrato
+  passes through. Above that, it only fixes the average offset of the note.
+* **AMOUNT** is how much of the correction is applied.
+* **CHROMATIC** accepts any semitone as a target. When it is off, the targets follow the HARMONY
+  panel:
+  * *CHORD*: the scale of the current chord, which can be automated on the timeline;
+  * *SCALE*: the chosen key;
+  * *MIDI CHORD* and *MIDI NOTES*: the held MIDI notes (with none held, any semitone).
 
-**Só afinação, sem harmonias:** ligue **LEAD TUNE** e desligue **HARMONIES** no topo. Depois
-escolha **SCALE**, a tonalidade e a escala. O Heaven funciona então como um auto-tune da voz
-principal. Com as duas opções ligadas, as harmonias nascem da nota já corrigida.
+**Pitch correction only, no harmonies:** turn on **LEAD TUNE** and turn off **HARMONIES** at the
+top. Then choose **SCALE**, the key and the scale. ChorusVox then works as a lead vocal
+auto-tune. With both on, the harmonies are built from the corrected note.
 
-Os formantes ficam onde estão, então o timbre da voz não muda com a correção. Bypass desliga as
-duas coisas, sem cliques.
+The formants stay where they are, so the correction does not change the timbre of the voice.
+Bypass turns both off, without clicks.
 
-**Latência:** 80 ms, reportada ao host. O Live compensa automaticamente na reprodução e na
-mixagem. Para gravar ouvindo a harmonia ao vivo o atraso é perceptível: grave a voz seca e use
-o Heaven na mixagem. Os 80 ms são o preço de olhar 30 ms à frente e saber em que nota o cantor
-vai chegar *antes* de escolher a harmonia.
+**Latency:** 80 ms, reported to the host. Live compensates for it automatically on playback and
+mixdown. To record while hearing the harmony live, the delay is noticeable: record the dry vocal
+and use ChorusVox at mixdown. The 80 ms is the price of looking 30 ms ahead and knowing which
+note the singer will reach *before* choosing the harmony.
 
 ---
 
-## Linhagem sonora
+## Sound lineage
 
-O Heaven é herdeiro de cinco décadas de harmonizadores. Cada geração resolveu um problema e
-deixou outro, e cada uma deixou uma ideia que está aqui dentro.
+ChorusVox inherits five decades of harmonizers. Each generation solved one problem and left
+another, and each left an idea that lives on here.
 
-| Época | Marco | O que trouxe | O que ficou faltando | O que o Heaven herdou |
+| Era | Milestone | What it brought | What was missing | What ChorusVox inherited |
 |---|---|---|---|---|
-| 1975 | **Eventide H910 Harmonizer** | O primeiro pitch shifter digital comercial: harmonia em tempo real. | Shift por linha de atraso variável: voz de "esquilo", formantes deslocadas, glitches periódicos. | A ideia de que uma voz pode cantar com ela mesma. |
-| 1989–1990 | **Lent** (*Computer Music Journal*) e **TD-PSOLA** (Moulines & Charpentier) | Pitch shift *sincronizado com o ciclo glotal*: cada grão é um ciclo da voz, então o envelope espectral (os formantes, "a cara" da voz) fica onde está. | Exige saber exatamente onde cada ciclo começa. | O motor de shift inteiro: grãos de dois períodos com janela de Hann, recolocados no período da nota alvo. |
-| anos 90 | **IVL Technologies → DigiTech Vocalist** (patentes US 5,231,671 e 5,567,901) | Harmonia inteligente em hardware: o método de Lent simplificado, histerese contra o vibrato, sibilantes passando sem shift, reamostragem dos grãos para mudar o "gênero" da voz. | Notas por tabela fixa de intervalos, sem noção de acorde ou de condução de vozes. | Histerese de notas, tratamento de consoantes e controle de garganta (Character) por reamostragem do grão. |
-| anos 2000 | **TC-Helicon** (VoicePrism, VoiceOne, VoiceLive) | Shift "híbrido" com correção de formantes, humanização e harmonia guiada pelo acompanhamento. Na linha das patentes de harmonia polifônica (US 8,168,877): histerese de ~0,2 semitom, nota estável só após ~100 ms, escolha entre terça menor e maior pela consonância com o acorde. | Latência mínima obrigatória em hardware ao vivo: decide a nota sem olhar à frente. | Escolha de notas por consonância com o acorde e a ideia de esperar a nota "assentar". |
-| 2000s–hoje | **Antares Harmony Engine** (e Auto-Tune, US 5,973,252) | 4 vozes, *Throat Modeling*, *Naturalize*, variação de pitch e tempo, modos Chord/Scale/MIDI, Choir. | Num teste lado a lado (abaixo), harmonias que desabam para uníssono, afinação achatada e robótica, e modulação de amplitude visível no espectro. | O modelo de interação (fonte da harmonia + vozes + humanização), reduzido ao essencial. |
+| 1975 | **Eventide H910 Harmonizer** | The first commercial digital pitch shifter: harmony in real time. | Shifting through a variable delay line: "chipmunk" voice, displaced formants, periodic glitches. | The idea that a voice can sing with itself. |
+| 1989–1990 | **Lent** (*Computer Music Journal*) and **TD-PSOLA** (Moulines & Charpentier) | Pitch shifting *synchronized to the glottal cycle*: each grain is one cycle of the voice, so the spectral envelope (the formants, the "face" of the voice) stays put. | Needs to know exactly where each cycle starts. | The whole shifting engine: two-period grains with a Hann window, re-placed at the target note's period. |
+| 1990s | **IVL Technologies → DigiTech Vocalist** (patents US 5,231,671 and 5,567,901) | Intelligent harmony in hardware: Lent's method simplified, hysteresis against vibrato, sibilants passing unshifted, grain resampling to change the "gender" of the voice. | Notes from a fixed interval table, with no notion of chords or voice leading. | Note hysteresis, consonant handling and throat control (Character) by grain resampling. |
+| 2000s | **TC-Helicon** (VoicePrism, VoiceOne, VoiceLive) | "Hybrid" shifting with formant correction, humanization and harmony guided by the accompaniment. In the line of the polyphonic harmony patents (US 8,168,877): ~0.2 semitone hysteresis, a note counts as stable only after ~100 ms, choosing a minor or major third by consonance with the chord. | Mandatory minimum latency in live hardware: it decides the note without looking ahead. | Choosing notes by consonance with the chord, and the idea of waiting for the note to "settle". |
+| 2000s–today | **Antares Harmony Engine** (and Auto-Tune, US 5,973,252) | 4 voices, *Throat Modeling*, *Naturalize*, pitch and timing variation, Chord/Scale/MIDI modes, Choir. | In a side-by-side test (below), harmonies collapsing into unison, flat and robotic tuning, and amplitude modulation visible in the spectrum. | The interaction model (harmony source + voices + humanization), reduced to the essentials. |
 
-O que o Heaven acrescenta a essa linhagem:
+What ChorusVox adds to this lineage:
 
-* **Lookahead real:** decide a nota da harmonia sabendo onde o cantor vai chegar.
-* **Transições proporcionais:** a harmonia sai da nota antiga para a nova na *mesma proporção*
-  do glide do lead, e uma nota comum fica parada, como num arranjo de verdade.
-* **Condução de vozes por custo:** sem segunda menor contra o lead, sem quintas paralelas,
-  acorde completo, shifts curtos.
-* **Afinação justa relativa ao lead:** a afinação de um grupo vocal.
-* **Humanização com base em dados de coro**, não em ruído arbitrário.
-
----
-
-## Como pesquisamos
-
-O Heaven foi feito numa sessão de pesquisa e engenharia com o Claude (Anthropic), com uma
-restrição curiosa: **quem escreveu o DSP não pode ouvir**. Então tudo que "soa bem" aqui
-precisou primeiro *medir* bem.
-
-### 1. Estado da arte
-
-* **Manuais.** Lemos o *Harmony Engine User Guide* e o manual do *Harmony Engine Evo* da
-  Antares de ponta a ponta. Vieram de lá a lista de ideias que funcionam (*Naturalize*,
-  variação de pitch e tempo, *Throat Length*, *Glide*, *Choir*) e a organização da
-  interface (fonte da harmonia → vozes → humanização).
-* **Patentes.**
-  * IVL/DigiTech (US 5,231,671 e US 5,567,901): janela de dois períodos, histerese "para o
-    cantor poder fazer vibrato sem a harmonia oscilar", sibilantes sem shift, janela que
-    encolhe em shifts para cima.
-  * Harmonia a partir de acompanhamento polifônico (US 8,168,877): histerese de 0,2 semitom,
-    100 ms para considerar a nota estável, terça menor contra maior decidida pelo acorde.
-  * Antares (US 5,973,252): detecção de pitch por autocorrelação, a base do Auto-Tune.
-* **Pesquisa acadêmica.**
-  * TD-PSOLA e o método de Lent, para o shift preservando formantes.
-  * YIN (de Cheveigné & Kawahara, 2002), para a detecção.
-  * Estudos de Ternström sobre a dispersão de afinação em coros: ouvintes preferem 0–5 cents
-    de desvio entre cantores e toleram até ~14. Medições em coros reais mostram 25–30 cents.
-    Isso calibrou o **Humanize**.
-* **Fóruns e produção.** Discussões no Gearspace e guias de mixagem de backing vocals
-  convergem em três pontos:
-  * sibilantes multiplicadas fazem harmonias parecerem "fora do tempo" e artificiais;
-  * harmonias soam melhor um pouco mais finas e mais baixas que o lead;
-  * excesso de uniformidade (afinação idêntica, tempo idêntico) denuncia o efeito.
-
-  Daí as consoantes atenuadas nas harmonias, o filtro passa-altas e a diferença de timbre
-  entre os cantores.
-
-### 2. O concorrente na bancada
-
-O Harmony Engine 4x instalado na máquina foi carregado via `pedalboard` (Spotify), com todos os
-parâmetros inspecionados e renders feitos por script. Medimos a latência dele (zero: o lead
-passa direto e as harmonias atrasam) e renderizamos referências com as mesmas configurações
-para comparar.
-
-### 3. Uma régua no lugar do ouvido
-
-Montamos uma bateria de avaliação objetiva:
-
-* **Afinação:** intervalo harmonia−lead quadro a quadro, medido com pyin.
-* **Estabilidade:** jitter excedente em relação ao lead e glitches de afinação.
-* **Periodicidade:** autocorrelação no período; grãos desalinhados derrubam esse valor.
-* **Cliques:** transientes de alta frequência acima do envelope local.
-* **Formantes:** erro de envelope medido *nos harmônicos* da saída, com a escala intencional
-  de formantes descontada.
-* **Espectrogramas:** inspecionados visualmente a cada mudança.
-
-O material de teste foi o seguinte:
-
-* vocais reais (stems de *Frederico Flores – The Bedroom Sessions* e um vocal de bossa);
-* um soprano e um barítono **sintéticos com f0 conhecido**, para medir o erro do detector em
-  cents absolutos.
-
-### 4. O que a régua encontrou (e o que consertamos)
-
-* **Soprano agudo lido uma oitava (ou um terço) abaixo.** Num sinal periódico todos os
-  múltiplos do período são vales do YIN, e a lista de candidatos tinha só 8 vagas. Agora são
-  32 em ordem de período, com correção de sub-harmônico genérica.
-* **Voz "creaky" virando oitava abaixo.** Pulsos alternados dobram o período aparente. A
-  descida de oitava passou a respeitar a continuidade, a menos que a evidência seja
-  esmagadora.
-* **Erro de oitava se perpetuando depois de uma transição.** Os dois vales são medíocres no
-  quadro de transição. O sub-múltiplo agora só vale se for realmente periódico.
-* **Leituras de 73 Hz em respirações e plosivas.** Criamos um "portão de tessitura" baseado
-  na mediana recente do cantor.
-* **Erro de oitava trocando a nota da harmonia.** Uma guarda dobra excursões de ±12 semitons
-  de volta à oitava atual e só aceita o salto se ele persistir 120 ms.
-* **Memória de condução de vozes travando o registro** (harmonia uma décima abaixo depois de
-  um erro de ataque). O movimento passou a ter custo limitado, e shifts acima de uma oitava
-  ficaram bem mais caros.
-* **Humanização "áspera".** O processo de Ornstein-Uhlenbeck é contínuo mas não liso em
-  escala curta. Uma suavização em 3 Hz levou o jitter da harmonia para *abaixo* do jitter do
-  lead.
-* **Caudas sopradas virando um uníssono fraco.** Criamos uma classe "vozeado fraco": a
-  harmonia continua na nota, mais baixa, até a cauda morrer.
-
-**Resultado final:** o erro mediano do detector é de 0,6 cent no soprano sintético. Depois de
-descontar a escala intencional de formantes, o erro de envelope fica abaixo de 1 dB de −12 a
-+12 semitons. O plugin roda a ~50× o tempo real no pior caso (4 vozes + Double a 96 kHz) e passa
-no `auval` e no `pluginval` em rigor 10.
-
-### A correção do lead em voz real
-
-Medido em 60 s de cada um de três vocais reais, com alvos cromáticos. O desvio é a distância
-até o semitom mais próximo, medida na saída. O RETUNE de 20 ms preserva o vibrato de propósito,
-e por isso mantém o desvio mais alto. A coluna de nível é a faixa p1–p99 em relação ao seco, em
-janelas de 10 ms.
-
-| | desvio mediano | nível |
-|---|---|---|
-| voz original | 11–21 cents | |
-| RETUNE 20 ms | 6–8 cents | −1,9 a +1,6 dB |
-| RETUNE 0 ms | 1,3–2,4 cents | −1,9 a +1,5 dB |
-
-Com a harmonia desligada, a correção roda a mais de 130× o tempo real.
-
-### Lado a lado com o Harmony Engine
-
-Mesmo trecho vocal, uma voz em terça diatônica acima:
-
-| | Harmony Engine 4x | Heaven |
-|---|---|---|
-| quadros com nota errada / uníssono (0–2 semitons) | 543 | 130 |
-| saltos bruscos de afinação | 27 | 2 |
-| distância de envelope espectral (menor = timbre mais fiel) | 12,1 | 8,6 |
-| jitter de afinação | 12,9 cents | 8,3 cents |
+* **Real lookahead:** it chooses the harmony note knowing where the singer will arrive.
+* **Proportional transitions:** the harmony leaves the old note for the new one in the *same
+  proportion* as the lead's glide, and a shared note stays still, as in a real arrangement.
+* **Cost-based voice leading:** no minor second against the lead, no parallel fifths, a complete
+  chord, short shifts.
+* **Just intonation relative to the lead:** the tuning of a vocal group.
+* **Humanization based on choir data**, not arbitrary noise.
 
 ---
 
-## Como funciona
+## How we researched it
 
-* **Altura do lead:** YIN via FFT a cada 4 ms, com:
-  * escolha de candidatos por continuidade;
-  * testes de oitava e de sub-harmônico;
-  * portão de tessitura;
-  * mediana de 3 quadros.
-* **Marcas de época:** uma por ciclo glotal. A primeira de cada trecho vai no pico do ciclo; as
-  seguintes vêm por correlação cruzada normalizada com o ciclo anterior. Os grãos somam em
-  fase: sem *phasing* nem aspereza.
-* **Shifter PSOLA:**
-  * janela de Hann de 2 períodos e interpolação cúbica fracionária;
-  * normalização de potência pela densidade de grãos;
-  * atrasos humanizados repetem ou pulam ciclos inteiros, sem efeito Doppler.
-* **Correção do lead:**
-  * o resultado é um deslocamento em semitons sobre o período de cada marca, então um erro de
-    oitava do detector não salta a voz;
-  * a nota alvo tem histerese e só troca sem chegar à vizinha depois de 150 ms, o que segura
-    vibratos largos e descentrados;
-  * os grãos somam normalizados pela soma das janelas, sem buracos nas emendas com consoantes;
-  * os canais L e R são processados com as mesmas marcas, preservando a imagem estéreo.
-* **Plano harmônico:**
-  * 30 ms de lookahead e histerese contra o vibrato;
-  * notas das vozes por busca exaustiva com custo de arranjo vocal;
-  * contexto de acorde e MIDI com carimbo de amostra (a automação fica alinhada ao áudio).
-* **Expressão:** a harmonia segue a entonação do lead (85%) e parte do vibrato (55%). Em
-  scoops e glissandos segue tudo.
-* **Cantores virtuais:** cada um tem atraso base, deriva lenta de afinação e tempo, nível e
-  "garganta" próprios. A garganta também acompanha 10% do shift (vozes mais agudas têm tratos
-  vocais mais curtos).
-* **Consoantes:** −10 dB nas harmonias, sibilantes a −15 dB.
+ChorusVox was built in a research and engineering session with Claude (Anthropic), under a
+curious constraint: **whoever wrote the DSP cannot hear**. So everything that "sounds good" here
+first had to *measure* well.
+
+### 1. State of the art
+
+* **Manuals.** We read the Antares *Harmony Engine User Guide* and *Harmony Engine Evo* manual
+  from end to end. They gave us the list of ideas that work (*Naturalize*, pitch and timing
+  variation, *Throat Length*, *Glide*, *Choir*) and the layout of the interface (harmony source
+  → voices → humanization).
+* **Patents.**
+  * IVL/DigiTech (US 5,231,671 and US 5,567,901): two-period window, hysteresis "so the singer
+    can do vibrato without the harmony oscillating", unshifted sibilants, a window that shrinks
+    on upward shifts.
+  * Harmony from polyphonic accompaniment (US 8,168,877): 0.2 semitone hysteresis, 100 ms to
+    consider a note stable, minor or major third decided by the chord.
+  * Antares (US 5,973,252): pitch detection by autocorrelation, the basis of Auto-Tune.
+* **Academic research.**
+  * TD-PSOLA and Lent's method, for formant-preserving shifting.
+  * YIN (de Cheveigné & Kawahara, 2002), for detection.
+  * Ternström's studies on pitch dispersion in choirs: listeners prefer 0–5 cents of deviation
+    between singers and tolerate up to ~14. Measurements in real choirs show 25–30 cents. This
+    calibrated **Humanize**.
+* **Forums and production.** Discussions on Gearspace and backing vocal mixing guides converge on
+  three points:
+  * multiplied sibilants make harmonies seem "out of time" and artificial;
+  * harmonies sound better slightly thinner and quieter than the lead;
+  * too much uniformity (identical tuning, identical timing) gives the effect away.
+
+  Hence the attenuated consonants in the harmonies, the high-pass filter and the timbre
+  differences between singers.
+
+### 2. The competitor on the bench
+
+The installed Harmony Engine 4x was loaded through `pedalboard` (Spotify), with all parameters
+inspected and renders made by script. We measured its latency (zero: the lead passes straight
+through and the harmonies lag) and rendered references with the same settings for comparison.
+
+### 3. A ruler instead of an ear
+
+We built an objective evaluation suite:
+
+* **Tuning:** harmony−lead interval frame by frame, measured with pyin.
+* **Stability:** excess jitter relative to the lead and pitch glitches.
+* **Periodicity:** autocorrelation at the period; misaligned grains lower this value.
+* **Clicks:** high-frequency transients above the local envelope.
+* **Formants:** envelope error measured *on the harmonics* of the output, with the intentional
+  formant scaling discounted.
+* **Spectrograms:** inspected visually at each change.
+
+The test material was:
+
+* real vocals (stems from *Frederico Flores – The Bedroom Sessions* and a bossa vocal);
+* a **synthetic soprano and baritone with known f0**, to measure the detector's error in absolute
+  cents.
+
+### 4. What the ruler found (and what we fixed)
+
+* **High soprano read an octave (or a third) too low.** In a periodic signal every multiple of
+  the period is a YIN valley, and the candidate list had only 8 slots. It now has 32 in period
+  order, with generic sub-harmonic correction.
+* **"Creaky" voice turning into the octave below.** Alternating pulses double the apparent
+  period. The downward octave move now respects continuity, unless the evidence is overwhelming.
+* **Octave error persisting after a transition.** Both valleys are mediocre in the transition
+  frame. The sub-multiple now only counts if it is truly periodic.
+* **73 Hz readings on breaths and plosives.** We created a "range gate" based on the singer's
+  recent median.
+* **Octave error changing the harmony note.** A guard folds ±12 semitone excursions back to the
+  current octave and only accepts the jump if it lasts 120 ms.
+* **Voice-leading memory locking the register** (harmony a tenth below after an attack error).
+  Movement now has a bounded cost, and shifts above an octave became much more expensive.
+* **"Rough" humanization.** The Ornstein-Uhlenbeck process is continuous but not smooth at short
+  scales. Smoothing at 3 Hz brought the harmony jitter *below* the lead's jitter.
+* **Breathy tails turning into a weak unison.** We created a "weakly voiced" class: the harmony
+  stays on the note, quieter, until the tail dies.
+* **Allocations on the audio thread.** Two buffers per block and a list per candidate voicing.
+  A test now counts allocations on the audio thread in every mode: there are none.
+
+**Final result:** the detector's median error is 0.6 cent on the synthetic soprano. After
+discounting the intentional formant scaling, the envelope error stays under 1 dB from −12 to +12
+semitones. The plugin runs at ~50× real time in the worst case (4 voices + Double at 96 kHz) and
+passes `auval` and `pluginval` at strictness 10.
+
+### Lead correction on real voices
+
+Measured on 60 s of each of three real vocals, with chromatic targets. The deviation is the
+distance to the nearest semitone, measured at the output. The 20 ms RETUNE preserves vibrato on
+purpose, which keeps its deviation higher. The level column is the p1–p99 range relative to the
+dry signal, in 10 ms windows.
+
+| | median deviation | level |
+|---|---|---|
+| original voice | 11–21 cents | |
+| RETUNE 20 ms | 6–8 cents | −1.9 to +1.6 dB |
+| RETUNE 0 ms | 1.3–2.4 cents | −1.9 to +1.5 dB |
+
+With the harmony off, the correction runs at more than 130× real time.
+
+### Side by side with Harmony Engine
+
+Same vocal passage, one voice a diatonic third above:
+
+| | Harmony Engine 4x | ChorusVox |
+|---|---|---|
+| frames with a wrong note / unison (0–2 semitones) | 543 | 130 |
+| abrupt pitch jumps | 27 | 2 |
+| spectral envelope distance (lower = truer timbre) | 12.1 | 8.6 |
+| pitch jitter | 12.9 cents | 8.3 cents |
+
+---
+
+## How it works
+
+* **Lead pitch:** YIN via FFT every 4 ms, with:
+  * candidate choice by continuity;
+  * octave and sub-harmonic tests;
+  * a range gate;
+  * a 3-frame median.
+* **Epoch marks:** one per glottal cycle. The first of each passage goes on the peak of the
+  cycle; the next ones come from normalized cross-correlation with the previous cycle. Grains sum
+  in phase: no *phasing* or roughness.
+* **PSOLA shifter:**
+  * 2-period Hann window and fractional cubic interpolation;
+  * power normalization by grain density;
+  * humanized delays repeat or skip whole cycles, with no Doppler effect.
+* **Lead correction:**
+  * the result is a shift in semitones over the period of each mark, so a detector octave error
+    does not make the voice jump;
+  * the target note has hysteresis and only changes without reaching the neighbor note after
+    150 ms, which holds wide and off-center vibratos;
+  * grains are normalized by the sum of the windows, with no holes at consonant boundaries;
+  * the L and R channels use the same marks, preserving the stereo image.
+* **Harmonic plan:**
+  * 30 ms of lookahead and hysteresis against vibrato;
+  * voice notes by exhaustive search with a vocal arrangement cost;
+  * chord and MIDI context with a sample timestamp (automation stays aligned to the audio).
+* **Expression:** the harmony follows the lead's intonation (85%) and part of its vibrato (55%).
+  In scoops and glissandos it follows everything.
+* **Virtual singers:** each has a base delay, slow pitch and timing drift, and its own level and
+  "throat". The throat also follows 10% of the shift (higher voices have shorter vocal tracts).
+* **Consonants:** −10 dB in the harmonies, sibilants at −15 dB.
 * **Mix:**
-  * passa-altas em 75 Hz e um leve corte de agudos nas harmonias;
-  * pan de potência constante;
-  * o nível do grupo é normalizado pelo número de vozes.
+  * high-pass at 75 Hz and a slight high-frequency cut on the harmonies;
+  * constant-power panning;
+  * the group level is normalized by the number of voices.
 
-## Desenvolvimento
+## Development
 
 ```bash
-cargo truce install --au2 --vst3            # compila, assina e instala
-cargo test --no-default-features            # testes de teoria musical e do motor
-cargo run --release --no-default-features --bin heaven_cli -- voz.wav saida.wav \
+cargo truce install --au2 --vst3            # build, sign and install
+cargo test --no-default-features            # music theory, engine and real-time tests
+cargo run --release --no-default-features --bin chorusvox_cli -- voice.wav out.wav \
     mode=chord voices=3 voicing=around chords="0:Am,4:F,8:C,12:G" double=1
-cargo run --release --no-default-features --bin heaven_cli -- voz.wav saida.wav \
+cargo run --release --no-default-features --bin chorusvox_cli -- voice.wav out.wav \
     tune=1 harmonies=0 retune=20 mode=scale root=A scale=minor
 cargo truce screenshot --out docs/gui.png
 ```
 
-O `heaven_cli` roda o mesmo motor do plugin offline. Ele aceita uma linha do tempo de acordes
-(como a automação do Live), notas MIDI por intervalo e `dump=arquivo.csv` com o pitch detectado
-e as notas alvo de cada voz.
+`chorusvox_cli` runs the same engine as the plugin offline. It accepts a chord timeline (like Live
+automation), MIDI notes by interval and `dump=file.csv` with the detected pitch and the target
+notes of each voice.
 
-Para publicar uma versão, atualize `version` no `Cargo.toml` e envie uma tag:
+To publish a version, update `version` in `Cargo.toml` and push a tag:
 
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.1 && git push origin v0.2.1
 ```
 
-O workflow `.github/workflows/release.yml` compila em cada sistema, valida com `pluginval`
-(e `auval` no macOS) e publica os pacotes na release. Em pull requests ele gera e valida os mesmos
-pacotes, sem publicar.
+The `.github/workflows/release.yml` workflow builds on each system, validates with `pluginval`
+(and `auval` on macOS) and publishes the packages to the release. On pull requests it builds and
+validates the same packages without publishing.
 
-Licença: MIT ou Apache-2.0.
+License: MIT or Apache-2.0.

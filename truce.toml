@@ -4,11 +4,11 @@ id = "com.jardimsonoro"
 au_manufacturer = "JdSn"
 
 [[plugin]]
-name = "Heaven"
-bundle_id = "heaven"
-crate = "heaven"
+name = "ChorusVox"
+bundle_id = "chorusvox"
+crate = "chorusvox"
 category = "effect"
 vst3_subcategory = "Pitch Shift"
-fourcc = "Heav"
+fourcc = "ChVx"
 au_tag = "Music Effects"
 midi_input = true
