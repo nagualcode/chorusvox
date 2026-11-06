@@ -96,7 +96,7 @@ jobs:
             "https://github.com/Tracktion/pluginval/releases/download/$PLUGINVAL_VERSION/pluginval_$asset.zip"
           unzip -oq pluginval.zip -d pv
           chmod +x pv/pluginval pv/pluginval.app/Contents/MacOS/pluginval 2>/dev/null || true
-          "${run[@]}" --strictness-level 10 --validate-in-process --timeout-ms 300000 target/bundles/Heaven.vst3
+          "${run[@]}" --strictness-level 10 --validate-in-process --timeout-ms 300000 target/bundles/ChorusVox.vst3
 
       - name: Empacota
         shell: bash
@@ -104,14 +104,14 @@ jobs:
           mkdir -p dist
           cd target/bundles
           case "$RUNNER_OS" in
-            macOS)   zip -qry "$GITHUB_WORKSPACE/dist/Heaven-${{ matrix.name }}.zip" Heaven.component Heaven.vst3 ;;
-            Windows) 7z a -bso0 "$GITHUB_WORKSPACE/dist/Heaven-${{ matrix.name }}.zip" Heaven.vst3 ;;
-            Linux)   tar -czf "$GITHUB_WORKSPACE/dist/Heaven-${{ matrix.name }}.tar.gz" Heaven.vst3 ;;
+            macOS)   zip -qry "$GITHUB_WORKSPACE/dist/ChorusVox-${{ matrix.name }}.zip" ChorusVox.component ChorusVox.vst3 ;;
+            Windows) 7z a -bso0 "$GITHUB_WORKSPACE/dist/ChorusVox-${{ matrix.name }}.zip" ChorusVox.vst3 ;;
+            Linux)   tar -czf "$GITHUB_WORKSPACE/dist/ChorusVox-${{ matrix.name }}.tar.gz" ChorusVox.vst3 ;;
           esac
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Heaven-${{ matrix.name }}
+          name: ChorusVox-${{ matrix.name }}
           path: dist/*
           if-no-files-found: error
 
@@ -134,4 +134,4 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           ls -la dist
-          gh release create "$TAG" dist/* --title "Heaven $TAG" --generate-notes --verify-tag
+          gh release create "$TAG" dist/* --title "ChorusVox $TAG" --generate-notes --verify-tag

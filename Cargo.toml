@@ -1,18 +1,18 @@
 [package]
-name = "heaven"
-version = "0.2.0"
+name = "chorusvox"
+version = "0.2.1"
 edition = "2021"
-description = "Heaven: harmonizador vocal natural em Rust (truce)"
+description = "ChorusVox: natural vocal harmonizer and pitch corrector in Rust (truce)"
 license = "MIT OR Apache-2.0"
 
 [lib]
-name = "heaven"
+name = "chorusvox"
 path = "src/lib.rs"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [[bin]]
-name = "heaven_cli"
-path = "src/bin/heaven_cli.rs"
+name = "chorusvox_cli"
+path = "src/bin/chorusvox_cli.rs"
 
 [features]
 default = ["truce-plugin"]

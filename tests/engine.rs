@@ -1,8 +1,8 @@
 //! Testes de integracao do motor com uma voz sintetica (trem de pulsos glotais filtrado).
 
-use heaven::dsp::harmony::{Mode, Voicing};
-use heaven::dsp::pitch::PitchTracker;
-use heaven::dsp::{Engine, EngineParams};
+use chorusvox::dsp::harmony::{Mode, Voicing};
+use chorusvox::dsp::pitch::PitchTracker;
+use chorusvox::dsp::{Engine, EngineParams};
 
 const SR: f32 = 48_000.0;
 
@@ -227,7 +227,7 @@ fn in_tune_singer_passes_almost_unchanged() {
 fn level_stays_flat_across_voiced_unvoiced_edges() {
     // vogal, ruido de consoante, vogal: a emenda nao pode criar buraco nem pico
     let mut x = voice(1.6, |_| 57.3);
-    let mut rng = heaven::dsp::util::Rng::new(7);
+    let mut rng = chorusvox::dsp::util::Rng::new(7);
     let (a, b) = ((SR * 0.7) as usize, (SR * 0.85) as usize);
     let level = rms(&x[..a]);
     for v in &mut x[a..b] {

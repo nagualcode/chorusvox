@@ -1,4 +1,4 @@
-//! Correcao de afinacao da voz principal (a parte "auto-tune" do Heaven).
+//! Correcao de afinacao da voz principal (a parte "auto-tune" do ChorusVox).
 //!
 //! O resultado e um DESLOCAMENTO em semitons, nunca uma altura absoluta: o PSOLA multiplica o
 //! periodo de cada marca por esse deslocamento. Assim um erro de oitava do detector nao salta a

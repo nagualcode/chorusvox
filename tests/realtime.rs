@@ -1,7 +1,7 @@
 //! The audio path must not allocate: a real-time thread cannot wait on the system allocator.
 
-use heaven::dsp::harmony::{Mode, Voicing};
-use heaven::dsp::{Engine, EngineParams};
+use chorusvox::dsp::harmony::{Mode, Voicing};
+use chorusvox::dsp::{Engine, EngineParams};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 

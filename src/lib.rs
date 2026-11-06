@@ -1,4 +1,4 @@
-//! Heaven: harmonizador vocal natural.
+//! ChorusVox: harmonizador vocal natural.
 //!
 //! O DSP (`dsp`) nao depende do framework e e o mesmo usado pelo CLI e pelos testes; aqui fica
 //! a ponte com o truce (parametros automatizaveis, MIDI, medidores e a interface).
@@ -76,7 +76,7 @@ pub mod truce_integration {
     }
 
     #[derive(Params)]
-    pub struct HeavenParams {
+    pub struct ChorusVoxParams {
         #[param(name = "Mode", default = 0)] pub mode: EnumParam<ModeChoice>,
         #[param(name = "Root", default = 0)] pub root: EnumParam<RootChoice>,
         #[param(name = "Chord", default = 0)] pub chord: EnumParam<ChordChoice>,
@@ -112,7 +112,7 @@ pub mod truce_integration {
         #[meter] pub meter_shift: MeterSlot,
     }
 
-    impl HeavenParams {
+    impl ChorusVoxParams {
         pub fn engine_params(&self) -> EngineParams {
             EngineParams {
                 mode: Mode::from_index(self.mode.index() as usize),
@@ -138,7 +138,7 @@ pub mod truce_integration {
         }
     }
 
-    pub struct HeavenDsp {
+    pub struct ChorusVoxDsp {
         engine: Engine,
         in_l: Vec<f32>,
         in_r: Vec<f32>,
@@ -148,7 +148,7 @@ pub mod truce_integration {
         held: [bool; 128],
     }
 
-    impl Default for HeavenDsp {
+    impl Default for ChorusVoxDsp {
         fn default() -> Self {
             Self {
                 engine: Engine::new(48_000.0),
@@ -162,19 +162,19 @@ pub mod truce_integration {
         }
     }
 
-    impl HeavenDsp {
+    impl ChorusVoxDsp {
         fn update_mask(&mut self) {
             self.midi_mask = self.held.iter().enumerate().filter(|(_, &h)| h).fold(0u16, |m, (n, _)| m | 1 << (n % 12));
         }
     }
 
-    pub struct Heaven;
+    pub struct ChorusVox;
 
-    impl PluginLogic for Heaven {
-        type Params = HeavenParams;
-        type DspState = HeavenDsp;
+    impl PluginLogic for ChorusVox {
+        type Params = ChorusVoxParams;
+        type DspState = ChorusVoxDsp;
 
-        fn init(_params: &Self::Params, _cx: &InitContext) -> Self::DspState { HeavenDsp::default() }
+        fn init(_params: &Self::Params, _cx: &InitContext) -> Self::DspState { ChorusVoxDsp::default() }
 
         fn reset(state: &mut Self::DspState, _params: &Self::Params, config: &AudioConfig) {
             // reconstruir o motor so quando a taxa muda (reset tambem chega em play/stop)
@@ -275,14 +275,14 @@ pub mod truce_integration {
 
         fn editor(params: Arc<Self::Params>) -> Box<dyn Editor> {
             Box::new(
-                truce_egui::EguiEditor::with_ui(params, (crate::gui::WIDTH, crate::gui::HEIGHT), crate::gui::HeavenGui::default())
+                truce_egui::EguiEditor::with_ui(params, (crate::gui::WIDTH, crate::gui::HEIGHT), crate::gui::ChorusVoxGui::default())
                     .with_visuals(crate::gui::visuals())
                     .resizable(false),
             )
         }
     }
 
-    pub use HeavenParamsParamId as P;
+    pub use ChorusVoxParamsParamId as P;
 
-    truce::plugin! { logic: Heaven, params: HeavenParams }
+    truce::plugin! { logic: ChorusVox, params: ChorusVoxParams }
 }

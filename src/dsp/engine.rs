@@ -1,4 +1,4 @@
-//! Motor do Heaven: liga o rastreador de altura, as marcas de epoca, o plano harmonico e os
+//! Motor do ChorusVox: liga o rastreador de altura, as marcas de epoca, o plano harmonico e os
 //! shifters PSOLA numa linha do tempo com latencia fixa.
 //!
 //! Linha do tempo: a amostra de entrada `n` sai em `n + L`. Com isso o plano harmonico do
@@ -45,7 +45,7 @@ pub struct EngineParams {
     pub pure: bool,
     /// Dobra cada harmonia (dois cantores por voz).
     pub double: bool,
-    /// Vozes de harmonia ligadas. Desligadas, o Heaven e so a correcao do lead.
+    /// Vozes de harmonia ligadas. Desligadas, o ChorusVox e so a correcao do lead.
     pub harmonies: bool,
     /// Correcao de afinacao do lead.
     pub tune: bool,
