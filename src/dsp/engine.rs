@@ -198,7 +198,8 @@ pub struct Engine {
 
     voices: Vec<GrainVoice>,
     tuner: LeadTuner,
-    lead_tuned: [GrainVoice; 2],
+    /// Lead corrigido, canais L e R.
+    lead_tuned: Vec<GrainVoice>,
     tune_mix: f32,
     hpf: [Biquad; NUM_VOICES],
     shelf: [Biquad; NUM_VOICES],
@@ -259,7 +260,7 @@ impl Engine {
             rng,
             voices: (0..NUM_VOICES).map(|_| GrainVoice::new()).collect(),
             tuner: LeadTuner::default(),
-            lead_tuned: [GrainVoice::transparent(), GrainVoice::transparent()],
+            lead_tuned: vec![GrainVoice::transparent(), GrainVoice::transparent()],
             tune_mix: 0.0,
             hpf: [Biquad::highpass(sr64, 75.0, 0.707); NUM_VOICES],
             shelf: [Biquad::high_shelf(sr64, 9000.0, -1.5); NUM_VOICES],
@@ -407,9 +408,9 @@ impl Engine {
         }
         self.voices = voices;
         let mut lead_tuned = std::mem::take(&mut self.lead_tuned);
-        let [tuned_l, tuned_r] = &mut lead_tuned;
-        tuned_l.plan(until, &self.dry_l, &self.marks, &LeadCtl { e: self }, &self.hann);
-        tuned_r.plan(until, &self.dry_r, &self.marks, &LeadCtl { e: self }, &self.hann);
+        for (voice, dry) in lead_tuned.iter_mut().zip([&self.dry_l, &self.dry_r]) {
+            voice.plan(until, dry, &self.marks, &LeadCtl { e: self }, &self.hann);
+        }
         self.lead_tuned = lead_tuned;
 
         // mistura

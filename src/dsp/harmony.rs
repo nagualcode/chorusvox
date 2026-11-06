@@ -193,12 +193,16 @@ pub fn choose_voicing(ctx: &HarmonyCtx, lead: i32, prev: Option<(&VoiceNotes, i3
     let mut out: VoiceNotes = [None; MAX_VOICES];
     if ctx.mode == Mode::MidiNotes {
         // As vozes cantam as notas seguradas (as 4 mais proximas do lead), da mais aguda a mais grave.
-        let mut notes: Vec<i32> = Vec::new();
-        notes.extend(ctx.midi_notes().iter().map(|&n| n as i32));
-        notes.sort_by_key(|&n| (n - lead).abs());
-        notes.truncate(MAX_VOICES);
-        notes.sort_by(|a, b| b.cmp(a));
-        for (o, n) in out.iter_mut().zip(notes) {
+        let mut held = [0i32; 16];
+        let count = ctx.midi_notes().len().min(held.len());
+        for (h, &n) in held.iter_mut().zip(ctx.midi_notes()) {
+            *h = n as i32;
+        }
+        let held = &mut held[..count];
+        held.sort_by_key(|&n| (n - lead).abs());
+        let nearest = &mut held[..count.min(MAX_VOICES)];
+        nearest.sort_by(|a, b| b.cmp(a));
+        for (o, &n) in out.iter_mut().zip(nearest.iter()) {
             *o = Some(n);
         }
         return out;
@@ -391,8 +395,13 @@ fn cost(
     }
     // conducao de vozes
     if let Some((pn, pl)) = prev {
-        let prevs: Vec<i32> = pn.iter().flatten().copied().collect();
-        if prevs.len() == k {
+        let mut prevs = [0i32; MAX_VOICES];
+        let mut held = 0;
+        for &n in pn.iter().flatten() {
+            prevs[held] = n;
+            held += 1;
+        }
+        if held == k {
             let lead_moved = lead != pl;
             // num salto grande do lead o voicing se reorganiza: movimento pesa menos
             let leap = (lead - pl).abs() > 7;
